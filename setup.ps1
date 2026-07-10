@@ -236,6 +236,11 @@ $i = 0
 foreach ($p in $deny) { $i++; Set-ExeDeny $p (-not $Undo); if ($i % 25 -eq 0) { Write-Host "  ...$i/$($deny.Count)" } }
 Write-Host "  done ($($deny.Count) items)." -ForegroundColor Green
 
+# Edge is the PDF viewer -> make sure msedge.exe is NOT left denied from a previous run
+if (-not $Undo) {
+    Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge","${env:ProgramFiles(x86)}\Microsoft\EdgeCore" -Recurse -Filter msedge.exe -ErrorAction SilentlyContinue | ForEach-Object { Set-ExeDeny $_.FullName $false }
+}
+
 # Otzar (Electron/Chromium) must be able to write its cache/profile under C:\OtzarApp, or it errors on start.
 if (-not $Undo -and (Test-Path $OtzarData)) {
     Write-Host "Granting $OtzarUser write to $OtzarData (Otzar cache/profile) ..." -ForegroundColor Cyan
