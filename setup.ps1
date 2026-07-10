@@ -299,9 +299,9 @@ if ($LASTEXITCODE -ne 0) {
         reg add $exp   /v NoWinKeys                  /t REG_DWORD /d 1 /f | Out-Null   # disable Win+key shortcuts (Win+I/Win+E...)
         reg add $srch1 /v DisableSearchBoxSuggestions /t REG_DWORD /d 1 /f | Out-Null
         reg add $srch2 /v BingSearchEnabled          /t REG_DWORD /d 0 /f | Out-Null
-        # Hebrew keyboard layout for the Otzar user (built into Windows; switch with Left Alt+Shift / Win+Space)
-        reg add "HKU\LockAll\Keyboard Layout\Preload" /v 1 /t REG_SZ /d "00000409" /f | Out-Null
-        reg add "HKU\LockAll\Keyboard Layout\Preload" /v 2 /t REG_SZ /d "0000040d" /f | Out-Null
+        # Keyboard layouts for the Otzar user (built into Windows; switch with Left Alt+Shift / Win+Space)
+        reg add "HKU\LockAll\Keyboard Layout\Preload" /v 1 /t REG_SZ /d "0000040d" /f | Out-Null   # Hebrew (primary)
+        reg add "HKU\LockAll\Keyboard Layout\Preload" /v 2 /t REG_SZ /d "00000409" /f | Out-Null   # English (secondary)
         reg add $exp   /v HideSCANetwork             /t REG_DWORD /d 1 /f | Out-Null   # no network icon / Wi-Fi flyout
         reg add $net   /v NC_LanChangeProperties     /t REG_DWORD /d 0 /f | Out-Null   # can't change connection props
         reg add $net   /v NC_ShowSharedAccessUI      /t REG_DWORD /d 0 /f | Out-Null
