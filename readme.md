@@ -13,8 +13,11 @@ passwordless standard user that can run **only Otzar Hachochma** (and receive in
 - Disables **Bluetooth**, Wi-Fi/network management, airplane mode, Start web-search, Win+key
   shortcuts, and the **Change Password** / **Task Manager** items on Ctrl+Alt+Del.
 - Keeps **printing** working (print-only: the user can't add/remove/manage printers).
-- Sets Otzar as an **auto-relaunching kiosk shell** — no desktop, no taskbar, no Start; if
-  Otzar is closed it reopens itself after ~5 seconds.
+- Installs **LibreOffice** (free Word/Excel/PowerPoint) and **SumatraPDF** (PDF viewer) via
+  winget and allow-lists them (printing works from both).
+- Replaces the desktop with a **custom bottom launcher bar** — buttons for **Otzar Hachochma**,
+  **LibreOffice**, and **PDF Viewer**. Otzar auto-launches and reopens itself ~5s after being
+  closed. No Start menu / Windows taskbar / desktop icons.
 - Pre-sets the `OTZARAPP` / `OTZARAPPCD` environment variables so Otzar never triggers its
   elevated `ovarsfix.bat` (no UAC prompt at boot).
 
