@@ -329,7 +329,7 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $net   /v NC_ShowSharedAccessUI      /f 2>$null | Out-Null
         reg delete $net   /v NC_PersonalFirewallConfig  /f 2>$null | Out-Null
         reg delete $net   /v NC_RasConnect              /f 2>$null | Out-Null
-        reg delete "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /v Deny_All /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /f 2>$null | Out-Null
         reg add    $wl    /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
         Write-Host "Policies removed, shell restored to explorer.exe." -ForegroundColor Green
     } else {
@@ -350,8 +350,14 @@ if ($LASTEXITCODE -ne 0) {
         reg add $net   /v NC_ShowSharedAccessUI      /t REG_DWORD /d 0 /f | Out-Null
         reg add $net   /v NC_PersonalFirewallConfig  /t REG_DWORD /d 0 /f | Out-Null
         reg add $net   /v NC_RasConnect              /t REG_DWORD /d 0 /f | Out-Null
-        # block USB flash drives / SD cards / phones / CDs for the user (verify D: still opens on the Otzar account)
-        reg add "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /v Deny_All /t REG_DWORD /d 1 /f | Out-Null
+        # block USB flash drives / SD cards / CDs (Deny_All) AND phones/cameras (WPD class needs its own deny).
+        # (The Otzar D: is a FIXED disk, so it stays usable.)
+        $rsd = "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices"
+        reg add $rsd /v Deny_All /t REG_DWORD /d 1 /f | Out-Null
+        foreach ($g in "{6AC27878-A6FA-4155-BA85-F98F491D4F33}","{F33FDC04-D1AC-4E8E-9A30-19BBD4B108AE}") {
+            reg add "$rsd\$g" /v Deny_Read  /t REG_DWORD /d 1 /f | Out-Null
+            reg add "$rsd\$g" /v Deny_Write /t REG_DWORD /d 1 /f | Out-Null
+        }
 
         # kiosk shell = a bottom LAUNCHER BAR (Otzar / LibreOffice / PDF Viewer) that also relaunches Otzar.
         # find the REAL Otzar launcher: prefer the shortcut; else the HEBREW-named exe on D:\
