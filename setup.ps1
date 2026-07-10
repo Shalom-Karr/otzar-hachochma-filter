@@ -273,6 +273,11 @@ if ($Undo) { Set-Service bthserv -StartupType Manual -ErrorAction SilentlyContin
 else       { Set-Service bthserv -StartupType Disabled -ErrorAction SilentlyContinue; Stop-Service bthserv -Force -ErrorAction SilentlyContinue }
 Write-Host "  bluetooth $(if($Undo){'enabled'}else{'disabled'})." -ForegroundColor Green
 
+# block MTP phones / cameras (portable devices) machine-wide - the per-user WPD policy is not reliable
+if ($Undo) { Set-Service WpdBusEnum -StartupType Manual -ErrorAction SilentlyContinue }
+else       { Stop-Service WpdBusEnum -Force -ErrorAction SilentlyContinue; Set-Service WpdBusEnum -StartupType Disabled -ErrorAction SilentlyContinue }
+Write-Host "  portable-device (MTP phone/camera) service $(if($Undo){'restored'}else{'disabled'})." -ForegroundColor Green
+
 # ---------------- 3b. lock-screen network UI (blocks Wi-Fi/airplane from lock screen) + keep printing ----------------
 $msys = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 if ($Undo) { reg delete $msys /v DontDisplayNetworkSelectionUI /f 2>$null | Out-Null }
