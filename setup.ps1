@@ -61,6 +61,12 @@ $acct = "$env:COMPUTERNAME\$OtzarUser"
 try { $sid = (New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $OtzarUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
 catch { $sid = $null; Write-Host "WARN: could not resolve SID for $acct" -ForegroundColor Yellow }
 
+# use the account's ACTUAL profile path (handles a duplicate 'Name.COMPUTER' profile)
+if ($sid) {
+    $realProfile = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue).LocalPath
+    if ($realProfile) { $OtzarProfile = $realProfile; Write-Host "Using profile: $OtzarProfile" -ForegroundColor DarkGray }
+}
+
 function Test-Allowed([string]$p) {
     $lp = $p.ToLower()
     foreach ($a in $AllowFolders) { if ($lp.StartsWith($a.ToLower().TrimEnd('\'))) { return $true } }
