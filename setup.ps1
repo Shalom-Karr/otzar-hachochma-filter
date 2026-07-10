@@ -34,7 +34,7 @@ param(
     [string[]]$AllowFolders = @("D:\", "C:\otzarApp"),   # Otzar's launcher drive + its app binaries; all else blocked (AnyDesk incoming still works via its service)
     [string[]]$RemoveUwp  = @(
         "WindowsStore","WindowsCalculator","ZuneMusic","ZuneVideo","Photos",
-        "Paint","MSPaint","MediaPlayer",
+        "Paint","MSPaint","MediaPlayer","WindowsNotepad",
         "SolitaireCollection","Xbox","GamingApp","BingWeather","BingNews",
         "GetHelp","Getstarted","Tips","OfficeHub","SkypeApp","Teams","MSTeams","People",
         "YourPhone","CrossDevice","WindowsMaps","MixedReality","WindowsAlarms","SoundRecorder",
@@ -153,7 +153,7 @@ foreach ($pf in @("$env:ProgramFiles", "${env:ProgramFiles(x86)}")) {
 $tools = @("regedit.exe","reg.exe","taskmgr.exe","control.exe","msconfig.exe","msinfo32.exe",
            "mstsc.exe","wmic.exe","certutil.exe","bitsadmin.exe","curl.exe","ftp.exe","tftp.exe",
            "wscript.exe","cscript.exe","mshta.exe","perfmon.exe","psr.exe","cleanmgr.exe","charmap.exe",
-           "mspaint.exe","iexplore.exe","WindowsPowerShell\v1.0\powershell.exe","WindowsPowerShell\v1.0\powershell_ise.exe")
+           "mspaint.exe","notepad.exe","iexplore.exe","WindowsPowerShell\v1.0\powershell.exe","WindowsPowerShell\v1.0\powershell_ise.exe")
 foreach ($t in $tools) {
     foreach ($base in @("$env:windir\System32","$env:windir\SysWOW64")) {
         $p = Join-Path $base $t
