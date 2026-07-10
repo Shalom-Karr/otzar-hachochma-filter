@@ -49,16 +49,18 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
 }
 
-# ---- create the locked-down STANDARD account (no password) if it doesn't exist ----
+# ---- create the locked-down STANDARD account if it doesn't exist ----
+# First run: create it with a TEMPORARY password "1234" so you can log in once to build the profile.
+# Second run (step 2, near the end): the password is removed so the kiosk logs in with no password.
 if (-not $Undo) {
     if (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue) {
         Write-Host "Account '$OtzarUser' already exists." -ForegroundColor DarkGray
     } else {
-        New-LocalUser -Name $OtzarUser -NoPassword -FullName $OtzarUser -Description "Locked-down Otzar Hachochma kiosk" -AccountNeverExpires | Out-Null
+        New-LocalUser -Name $OtzarUser -Password (ConvertTo-SecureString "1234" -AsPlainText -Force) -FullName $OtzarUser -Description "Locked-down Otzar Hachochma kiosk" -AccountNeverExpires -PasswordNeverExpires | Out-Null
         Add-LocalGroupMember -Group "Users" -Member $OtzarUser   # STANDARD user, NOT an administrator
-        Write-Host "Created STANDARD account '$OtzarUser' (no password)." -ForegroundColor Green
-        Write-Host "NEXT: log into '$OtzarUser' ONCE (creates its profile + lets Otzar do first-run)," -ForegroundColor Yellow
-        Write-Host "      sign out, then run setup.ps1 AGAIN to apply the kiosk shell + policies." -ForegroundColor Yellow
+        Write-Host "Created STANDARD account '$OtzarUser' with TEMPORARY password: 1234" -ForegroundColor Green
+        Write-Host "NEXT: log into '$OtzarUser' ONCE using password 1234 (builds its profile + Otzar first-run)," -ForegroundColor Yellow
+        Write-Host "      sign out, then run setup.ps1 AGAIN - it applies the shell/policies AND removes the password." -ForegroundColor Yellow
     }
 }
 
@@ -417,6 +419,12 @@ Start-Process "__OTZAR__" -ErrorAction SilentlyContinue
     }
     [gc]::Collect(); Start-Sleep 2
     reg unload "HKU\LockAll" | Out-Null
+    if (-not $Undo) {
+        # Step 2: reaching here means the profile is built and the shell/policies are applied ->
+        # remove the temporary password so the kiosk logs in with NO password.
+        net user "$OtzarUser" "" 2>$null | Out-Null
+        Write-Host "Removed the temporary password - '$OtzarUser' now logs in with NO password." -ForegroundColor Green
+    }
 }
 
 Write-Host "`nDone. Reboot or sign into '$OtzarUser' to verify." -ForegroundColor Magenta
