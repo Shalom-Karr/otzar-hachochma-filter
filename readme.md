@@ -94,3 +94,10 @@ Example: `.\setup.ps1 -AllowFolders "E:\"` if the Otzar drive is `E:`.
 - **`cmd.exe` is intentionally allowed** — Otzar (an Electron app) spawns it at startup. The
   user still has no way to launch a command prompt (no shell UI, no Run, no Task Manager).
 - Only the `Otzar Hachochma` account is affected. Your admin account is completely normal.
+
+## License
+
+Licensed under the **PolyForm Noncommercial License 1.0.0** (see `LICENSE`).
+You may **use, modify, and share** these scripts for any **noncommercial** purpose
+(personal use, a shul/nonprofit, education, research). **Commercial use — including
+selling them or bundling them into a paid product or service — is not permitted.**
