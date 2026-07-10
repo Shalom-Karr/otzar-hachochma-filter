@@ -23,8 +23,9 @@ if ($line -and ($line -match '\s(\d+)\s+(Active|Disc)')) {
 
 # delete the user profile (folder + registry entry) cleanly, then the account
 Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
-    Where-Object { $_.LocalPath -like "*\$OtzarUser" } |
+    Where-Object { $_.LocalPath -like "*\$OtzarUser*" } |
     ForEach-Object { Remove-CimInstance $_ -ErrorAction SilentlyContinue }
+Remove-Item "C:\Users\$OtzarUser", "C:\Users\$OtzarUser.*" -Recurse -Force -ErrorAction SilentlyContinue
 
 if (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue) {
     Remove-LocalUser -Name $OtzarUser
