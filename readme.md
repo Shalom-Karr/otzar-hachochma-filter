@@ -74,10 +74,10 @@ works as a remote path.
 
 From the same folder, in an elevated PowerShell:
 ```powershell
-.\uninstall.ps1                  # undo the lockdown, KEEP the account + its data
-.\uninstall.ps1 -RemoveAccount   # undo the lockdown AND delete the account
+.\uninstall.ps1
 ```
-Reboot afterward.
+This **deletes the `Otzar Hachochma` account and its profile**, removes the kiosk files, and
+reverts the machine-wide toggles (Bluetooth, printer/network policies, env vars).
 
 ## Customizing
 
