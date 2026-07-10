@@ -28,7 +28,7 @@ param(
     [string]$OtzarAppVar   = "C:\otzarApp\otzarLocal",                        # OTZARAPP env var Otzar expects
     [string]$OtzarAppCdVar = "C:\otzarApp\otzarLocal\launcher\bin\x64\app",   # OTZARAPPCD env var Otzar expects
     [string]$ShellLnk     = "C:\Users\Otzar Hachochma\Desktop\Otzar Hachochma.lnk",
-    [string[]]$AllowFolders = @("D:\"),   # only the Otzar drive may launch; AnyDesk is blocked (incoming still works via its service)
+    [string[]]$AllowFolders = @("D:\", "C:\otzarApp"),   # Otzar's launcher drive + its app binaries; all else blocked (AnyDesk incoming still works via its service)
     [string[]]$RemoveUwp  = @(
         "WindowsStore","WindowsCalculator","ZuneMusic","ZuneVideo","Photos",
         "Paint","MSPaint","MediaPlayer",
@@ -126,8 +126,38 @@ foreach ($t in $tools) {
     }
 }
 
-# dedupe + drop anything under an allowed folder (Otzar / AnyDesk)
-$deny = @($found | Sort-Object -Unique | Where-Object { (-not (Test-Allowed $_)) -and ($_ -notmatch '(?i)\\Users\\') })
+# 4) registered programs (Add/Remove Programs) - catches apps installed to custom folders / other drives
+$uninstKeys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+foreach ($u in (Get-ItemProperty $uninstKeys -ErrorAction SilentlyContinue)) {
+    $loc = "$($u.InstallLocation)".Trim('"').TrimEnd('\')
+    if ($loc -and (Test-Path -LiteralPath $loc) -and (-not (Test-Allowed $loc)) -and ($loc -notmatch '(?i)\\Windows\b|Common Files|WindowsApps')) {
+        Get-ChildItem -LiteralPath $loc -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $found.Add($_.FullName) }
+    }
+}
+
+# 5) C:\ProgramData app exes (skip OS / system / package folders)
+Get-ChildItem "$env:ProgramData" -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '(?i)\\Microsoft\\|\\Windows\\|\\Package Cache\\|\\Packages\\' } |
+    ForEach-Object { $found.Add($_.FullName) }
+
+# 6) per-user installed apps (AppData\Local\Programs) across all profiles
+Get-ChildItem "C:\Users\*\AppData\Local\Programs" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem $_.FullName -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $found.Add($_.FullName) }
+}
+
+# 7) other FIXED drives (not C:, not the allowed Otzar drive) - installed / portable apps
+foreach ($dsk in (Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue)) {
+    $root = "$($dsk.DeviceID)\"
+    if (($root -ieq "C:\") -or (Test-Allowed $root)) { continue }
+    Get-ChildItem $root -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $found.Add($_.FullName) }
+}
+
+# dedupe + drop anything under an allowed folder; keep per-user Program installs, drop other in-profile noise
+$deny = @($found | Sort-Object -Unique | Where-Object {
+    (-not (Test-Allowed $_)) -and
+    ( ($_ -notmatch '(?i)\\Users\\') -or ($_ -match '(?i)\\AppData\\Local\\Programs\\') )
+})
 
 # AnyDesk: block the USER from launching it. D:\ is allowed, so its AnyDesk.exe must be added explicitly.
 # Incoming/unattended still works because the AnyDesk service runs as SYSTEM (not this user).
