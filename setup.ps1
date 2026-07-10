@@ -478,7 +478,7 @@ $bar.Show()
 '@
             $kioskExe    = Join-Path $kiosk "kioskbar.exe"
             $browserPs1  = Join-Path $kiosk "pdfbrowser.ps1"
-            $pdfArgs     = "-NoProfile -Sta -ExecutionPolicy Bypass -File `"$browserPs1`""
+            $pdfArgs     = "-NoProfile -Sta -ExecutionPolicy Bypass -File $browserPs1"
             $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $kioskExe).Replace('__PDFARGS__', $pdfArgs)
             $barPs1 = Join-Path $kiosk "kioskbar.ps1"
             Set-Content -Path $barPs1 -Value $barBody -Encoding ASCII
