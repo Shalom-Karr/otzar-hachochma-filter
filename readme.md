@@ -6,7 +6,8 @@ passwordless standard user that can run **only Otzar Hachochma** (and receive in
 
 ## What it does
 
-- Creates a **standard** user **`Otzar Hachochma`** with **no password**.
+- Creates a **standard** user **`Otzar Hachochma`** — with a temporary password `1234` for the
+  first login, which the second run removes (kiosk then logs in with **no password**).
 - Blocks every other program for that user (browsers, cmd/PowerShell, Task Manager,
   Settings, File Explorer, etc.) via NTFS execute-deny — the method that reliably works on Pro.
 - Removes Store apps (Store, Calculator, Solitaire, Xbox, Paint, Photos, Media Player, etc.).
@@ -48,9 +49,10 @@ passwordless standard user that can run **only Otzar Hachochma** (and receive in
    ```powershell
    .\setup.ps1
    ```
-7. **Log into the `Otzar Hachochma` account once** (it has no password). This builds its
-   user profile and lets Otzar do its first-run setup. Then **sign out**.
-8. Back on the admin account, **run it again** to apply the kiosk shell + per-user policies:
+7. **Log into the `Otzar Hachochma` account once** using the temporary password **`1234`**.
+   This builds its user profile and lets Otzar do its first-run setup. Then **sign out**.
+8. Back on the admin account, **run it again**. This applies the kiosk shell + per-user
+   policies **and removes the password** (so the kiosk then logs in with no password):
    ```powershell
    .\setup.ps1
    ```
