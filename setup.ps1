@@ -329,6 +329,7 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $net   /v NC_ShowSharedAccessUI      /f 2>$null | Out-Null
         reg delete $net   /v NC_PersonalFirewallConfig  /f 2>$null | Out-Null
         reg delete $net   /v NC_RasConnect              /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /v Deny_All /f 2>$null | Out-Null
         reg add    $wl    /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
         Write-Host "Policies removed, shell restored to explorer.exe." -ForegroundColor Green
     } else {
@@ -349,6 +350,8 @@ if ($LASTEXITCODE -ne 0) {
         reg add $net   /v NC_ShowSharedAccessUI      /t REG_DWORD /d 0 /f | Out-Null
         reg add $net   /v NC_PersonalFirewallConfig  /t REG_DWORD /d 0 /f | Out-Null
         reg add $net   /v NC_RasConnect              /t REG_DWORD /d 0 /f | Out-Null
+        # block USB flash drives / SD cards / phones / CDs for the user (verify D: still opens on the Otzar account)
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /v Deny_All /t REG_DWORD /d 1 /f | Out-Null
 
         # kiosk shell = a bottom LAUNCHER BAR (Otzar / LibreOffice / PDF Viewer) that also relaunches Otzar.
         # find the REAL Otzar launcher: prefer the shortcut; else the HEBREW-named exe on D:\
