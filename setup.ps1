@@ -371,10 +371,12 @@ if ($LASTEXITCODE -ne 0) {
 
             $kiosk = Join-Path $drive "Kiosk"
             New-Item -ItemType Directory -Path $kiosk -Force | Out-Null
-            # a renamed copy of powershell (System32 powershell is denied to the user) runs the bar
+            # renamed copies: wscript = the shell (bulletproof), powershell = runs the WinForms bar
+            Copy-Item "$env:windir\System32\wscript.exe" (Join-Path $kiosk "kioskshell.exe") -Force
             Copy-Item "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe" (Join-Path $kiosk "kioskbar.exe") -Force
 
             $barBody = @'
+try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $scr = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -423,6 +425,12 @@ $ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
 $bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22))
 $bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22))
 $bg.Controls.Add((New-Tile "PDF Viewer" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22))
+$cred = New-Object System.Windows.Forms.Label
+$cred.Text = "Built by Shalom Karr (216) 451-6698"
+$cred.ForeColor = [System.Drawing.Color]::FromArgb(120,140,170)
+$cred.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$cred.TextAlign = "MiddleCenter"; $cred.SetBounds(0, ($scr.Height - $barH - 60), $scr.Width, 30)
+$bg.Controls.Add($cred)
 # slim always-on-top bottom bar (reachable while an app is open)
 $bar = New-Object System.Windows.Forms.Form
 $bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
@@ -432,39 +440,54 @@ $bar.BackColor = $colTile
 $bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12))
 $bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12))
 $bar.Controls.Add((New-Tile "PDF Viewer" "__PDF__" 466 12 200 48 12))
+$barCred = New-Object System.Windows.Forms.Label
+$barCred.Text = "Built by Shalom Karr (216) 451-6698"
+$barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
+$barCred.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 380), 20, 360, 30)
+$barCred.Anchor = "Top,Right"
+$bar.Controls.Add($barCred)
 $bar.Show()
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 5000
-$timer.Add_Tick({
-  $run = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match "otzar" }
-  if (-not $run) { Start-Process "__OTZAR__" -ErrorAction SilentlyContinue }
-})
-$timer.Start()
-$bg.Add_Shown({ Start-Process "__OTZAR__" -ErrorAction SilentlyContinue })
 [System.Windows.Forms.Application]::Run($bg)
+} catch { $_ | Out-File "$env:TEMP\kioskbar-error.log" -Force }
 '@
             $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $PdfViewerExe)
-            $bar = Join-Path $kiosk "kioskbar.ps1"
-            Set-Content -Path $bar -Value $barBody -Encoding ASCII
-            # lock the folder: user can run/read but NOT edit the bar script
+            $barPs1 = Join-Path $kiosk "kioskbar.ps1"
+            Set-Content -Path $barPs1 -Value $barBody -Encoding ASCII
+
+            # the SHELL is a wscript relauncher: launches the bar once (STA) + keeps Otzar running.
+            # If the bar ever fails, Otzar still runs full-screen (no black screen).
+            $vbsBody = @'
+On Error Resume Next
+Set sh = CreateObject("WScript.Shell")
+sh.Run "__KIOSK__\kioskbar.exe -NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File __KIOSK__\kioskbar.ps1", 0, False
+Set svc = GetObject("winmgmts:\\.\root\cimv2")
+Do
+  running = False
+  For Each p In svc.ExecQuery("Select Name from Win32_Process")
+    If InStr(LCase("" & p.Name), "otzar") > 0 Then running = True
+  Next
+  If Not running Then sh.Run "__OTZAR__", 1, False
+  WScript.Sleep 5000
+Loop
+'@
+            $vbsBody = $vbsBody.Replace('__KIOSK__', $kiosk.TrimEnd('\')).Replace('__OTZAR__', $appPath)
+            $vbs = Join-Path $kiosk "relaunch.vbs"
+            Set-Content -Path $vbs -Value $vbsBody -Encoding ASCII
+
+            # lock the folder: user can run/read but NOT edit the scripts
             icacls $kiosk /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${acct}:(OI)(CI)RX" | Out-Null
 
-            $shellCmd = (Join-Path $kiosk "kioskbar.exe") + " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + $bar
+            $shellCmd = (Join-Path $kiosk "kioskshell.exe") + " " + $vbs
             reg add $wl /v Shell /t REG_SZ /d $shellCmd /f | Out-Null
-            Write-Host "Policies set; launcher-bar shell = $shellCmd" -ForegroundColor Green
-            Write-Host "  (bottom bar: Otzar / LibreOffice / PDF Viewer; Otzar auto-relaunches)" -ForegroundColor DarkGray
+            Write-Host "Policies set; shell = wscript relauncher (Otzar full-screen + the launcher bar)." -ForegroundColor Green
+            Write-Host "  If the bar fails it logs to the user's TEMP\kioskbar-error.log; Otzar still runs (no black screen)." -ForegroundColor DarkGray
         } else {
             Write-Host "Policies set; could NOT resolve the Otzar exe for the shell - pass -ShellLnk." -ForegroundColor Yellow
         }
     }
     [gc]::Collect(); Start-Sleep 2
     reg unload "HKU\LockAll" | Out-Null
-    if (-not $Undo) {
-        # Step 2: reaching here means the profile is built and the shell/policies are applied ->
-        # remove the temporary password so the kiosk logs in with NO password.
-        net user "$OtzarUser" "" 2>$null | Out-Null
-        Write-Host "Removed the temporary password - '$OtzarUser' now logs in with NO password." -ForegroundColor Green
-    }
 }
 
 # ---------------- clean the Otzar profile: keep Documents, remove Desktop + other user folders ----------------
@@ -475,6 +498,14 @@ if ((-not $Undo) -and (Test-Path $OtzarProfile)) {
         ($_.Name -notin $keep) -and (-not ($_.Attributes.ToString() -match 'ReparsePoint'))
     } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host "Cleaned '$OtzarUser' profile (removed Desktop + other folders; kept Documents)." -ForegroundColor Green
+}
+
+# ---------------- set the account to a BLANK password (kiosk logs in with NO password) ----------------
+if ((-not $Undo) -and (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue)) {
+    net user "$OtzarUser" "" 2>$null | Out-Null                                    # method 1
+    try { Set-LocalUser -Name $OtzarUser -Password (New-Object System.Security.SecureString) -ErrorAction Stop } catch { }  # method 2 (fallback)
+    Set-LocalUser -Name $OtzarUser -PasswordNeverExpires $true -ErrorAction SilentlyContinue
+    Write-Host "Set '$OtzarUser' to a BLANK password (logs in with no password)." -ForegroundColor Green
 }
 
 Write-Host "`nDone. Reboot or sign into '$OtzarUser' to verify." -ForegroundColor Magenta
