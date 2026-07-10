@@ -41,26 +41,28 @@ passwordless standard user that can run **only Otzar Hachochma** (and receive in
    cd "$env:USERPROFILE\Downloads\Otzar Hachochma Filter"
    Set-ExecutionPolicy -Scope Process Bypass -Force
    ```
-5. **Preview** what will be blocked (optional, changes nothing):
+5. **STEP 1 — create the account:**
+   ```powershell
+   .\create.ps1
+   ```
+   Makes the standard `Otzar Hachochma` account with temporary password **`1234`**.
+6. **Log into the `Otzar Hachochma` account once** using password **`1234`** — this builds
+   its user profile and lets Otzar do its first-run setup. Then **sign out**.
+7. Back on the admin account, **preview** (optional, changes nothing):
    ```powershell
    .\setup.ps1 -ListOnly
    ```
-6. **First run** — creates the account + applies the machine-wide lockdown:
+8. **STEP 2 — apply the lockdown:**
    ```powershell
    .\setup.ps1
    ```
-7. **Log into the `Otzar Hachochma` account once** using the temporary password **`1234`**.
-   This builds its user profile and lets Otzar do its first-run setup. Then **sign out**.
-8. Back on the admin account, **run it again**. This applies the kiosk shell + per-user
-   policies **and removes the password** (so the kiosk then logs in with no password):
-   ```powershell
-   .\setup.ps1
-   ```
-9. **Reboot.** Sign into `Otzar Hachochma` — it should boot straight into Otzar, fullscreen,
-   with nothing else reachable.
+   Installs LibreOffice + SumatraPDF, blocks everything else, builds the launcher UI, and
+   **removes the password** (the kiosk then logs in with none).
+9. **Reboot.** Sign into `Otzar Hachochma` — it boots into the launcher UI and Otzar auto-opens.
 
-> The two-step (run -> log in once -> run again) is needed because the per-user policies and
-> kiosk shell live in the account's profile, which doesn't exist until its first logon.
+> Why two scripts with a login in between: the per-user policies and launcher shell live in
+> the account's profile, which doesn't exist until its first logon. `create.ps1` makes the
+> account, the login builds the profile, and `setup.ps1` then locks it down in a single run.
 
 ## Escape hatch (how you, the admin, get back in)
 
