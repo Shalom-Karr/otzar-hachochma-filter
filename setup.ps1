@@ -103,7 +103,8 @@ if (-not (Test-Path $PdfViewerExe)) {
 if ((Test-Path $PdfViewerExe) -and ($PdfViewerExe -match '(?i)\\Users\\')) {
     $dst = "C:\Program Files\SumatraPDF"
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    Copy-Item (Split-Path $PdfViewerExe -Parent)\* $dst -Recurse -Force -ErrorAction SilentlyContinue
+    $srcDir = Split-Path $PdfViewerExe -Parent
+    Copy-Item -Path (Join-Path $srcDir '*') -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
     $machineExe = Join-Path $dst (Split-Path $PdfViewerExe -Leaf)
     if (Test-Path $machineExe) { $PdfViewerExe = $machineExe }
 }
