@@ -338,13 +338,15 @@ if ($LASTEXITCODE -ne 0) {
         # kiosk shell = a bottom LAUNCHER BAR (Otzar / LibreOffice / PDF Viewer) that also relaunches Otzar.
         $target = $null
         if (Test-Path $ShellLnk) { $target = $sh.CreateShortcut($ShellLnk).TargetPath }
-        if (-not $target) { $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'anydesk' } | Select-Object -First 1).FullName }
+        if ((-not $target) -or (-not (Test-Path $target)) -or ($target -match 'OtzarKiosk')) {
+            $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'anydesk|otzarkiosk' } | Select-Object -First 1).FullName
+        }
         if ($target) {
             $drive = [System.IO.Path]::GetPathRoot($target)
             $link = Join-Path $drive "OtzarKiosk.exe"     # ASCII pointer to the Hebrew-named exe
             try {
-                if (Test-Path $link) { Remove-Item $link -Force -ErrorAction SilentlyContinue }
-                New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop | Out-Null
+                New-Item -ItemType SymbolicLink -Path $link -Target $target -Force -ErrorAction Stop | Out-Null
+                if (-not (Test-Path $link)) { $link = $null }
             } catch { $link = $null }
             $appPath = if ($link) { $link } else { $target }
 
@@ -371,28 +373,47 @@ $rc = New-Object WA+RECT
 $rc.L = 0; $rc.T = 0; $rc.R = $scr.Width; $rc.B = $scr.Height - $barH
 [WA]::SystemParametersInfo(0x2F, 0, [ref]$rc, 3) | Out-Null
 } catch {}
-$form = New-Object System.Windows.Forms.Form
-$form.FormBorderStyle = "None"
-$form.TopMost = $true
-$form.ShowInTaskbar = $false
-$form.StartPosition = "Manual"
-$form.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
-$form.BackColor = [System.Drawing.Color]::FromArgb(28,28,38)
-function New-LaunchButton($text, $exe, $x) {
+$colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
+$colTile = [System.Drawing.Color]::FromArgb(30,41,59)
+function New-Tile($text, $exe, $x, $y, $w, $h, $fs) {
   $b = New-Object System.Windows.Forms.Button
-  $b.Text = $text
-  $b.SetBounds($x, 8, 260, 56)
-  $b.FlatStyle = "Flat"
-  $b.ForeColor = [System.Drawing.Color]::White
-  $b.BackColor = [System.Drawing.Color]::FromArgb(58,58,82)
-  $b.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
-  $b.Tag = $exe
+  $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
+  $b.FlatStyle = "Flat"; $b.FlatAppearance.BorderSize = 0
+  $b.ForeColor = [System.Drawing.Color]::White; $b.BackColor = $colTile
+  $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", $fs)
+  $b.Cursor = "Hand"; $b.Tag = $exe
   $b.Add_Click({ Start-Process -FilePath $this.Tag -ErrorAction SilentlyContinue })
-  $form.Controls.Add($b)
+  $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+  $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+  return $b
 }
-New-LaunchButton "Otzar Hachochma" "__OTZAR__" 20
-New-LaunchButton "LibreOffice" "__LIBRE__" 300
-New-LaunchButton "PDF Viewer" "__PDF__" 580
+# full-screen launcher "desktop" (visible when no app is open)
+$bg = New-Object System.Windows.Forms.Form
+$bg.FormBorderStyle = "None"; $bg.StartPosition = "Manual"
+$bg.Bounds = New-Object System.Drawing.Rectangle(0, 0, $scr.Width, ($scr.Height - $barH))
+$bg.BackColor = $colBg
+$bg.Add_FormClosing({ if ($args[1].CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) { $args[1].Cancel = $true } })
+$title = New-Object System.Windows.Forms.Label
+$title.Text = "Otzar Hachochma"; $title.ForeColor = [System.Drawing.Color]::White
+$title.Font = New-Object System.Drawing.Font("Segoe UI Light", 42)
+$title.TextAlign = "MiddleCenter"; $title.SetBounds(0, 80, $scr.Width, 100)
+$bg.Controls.Add($title)
+$tw = 300; $th = 190; $gap = 44
+$sx = [int](($scr.Width - ($tw * 3 + $gap * 2)) / 2)
+$ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
+$bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22))
+$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22))
+$bg.Controls.Add((New-Tile "PDF Viewer" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22))
+# slim always-on-top bottom bar (reachable while an app is open)
+$bar = New-Object System.Windows.Forms.Form
+$bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
+$bar.StartPosition = "Manual"
+$bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
+$bar.BackColor = $colTile
+$bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12))
+$bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12))
+$bar.Controls.Add((New-Tile "PDF Viewer" "__PDF__" 466 12 200 48 12))
+$bar.Show()
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({
@@ -400,8 +421,8 @@ $timer.Add_Tick({
   if (-not $run) { Start-Process "__OTZAR__" -ErrorAction SilentlyContinue }
 })
 $timer.Start()
-Start-Process "__OTZAR__" -ErrorAction SilentlyContinue
-[System.Windows.Forms.Application]::Run($form)
+$bg.Add_Shown({ Start-Process "__OTZAR__" -ErrorAction SilentlyContinue })
+[System.Windows.Forms.Application]::Run($bg)
 '@
             $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $PdfViewerExe)
             $bar = Join-Path $kiosk "kioskbar.ps1"
