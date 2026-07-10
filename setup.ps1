@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Otzar Hachochma kiosk setup (STEP 2). Locks the "Otzar Hachochma" account to Otzar +
-  LibreOffice + SumatraPDF: blocks every other program (NTFS deny), applies kiosk policies,
+  LibreOffice + a read-only PDF file browser: blocks every other program (NTFS deny), applies kiosk policies,
   removes Store/media apps, disables Bluetooth, keeps printing + AnyDesk-incoming working,
   builds the launcher UI, and removes the temporary password.
 
@@ -40,9 +40,8 @@ param(
         "YourPhone","CrossDevice","WindowsMaps","MixedReality","WindowsAlarms","SoundRecorder",
         "Clipchamp","Todos","PowerAutomateDesktop","WindowsCamera","FeedbackHub","549981C3F5F10","Copilot"
     ),
-    [bool]$InstallApps      = $true,   # winget-install LibreOffice + SumatraPDF
+    [bool]$InstallApps      = $true,   # winget-install LibreOffice
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
-    [string]$PdfViewerExe   = "C:\Program Files\SumatraPDF\SumatraPDF.exe",
     [switch]$ListOnly,
     [switch]$Undo
 )
@@ -88,36 +87,25 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
     }
 }
 
-# ---------------- install the allowed apps (LibreOffice + SumatraPDF) + allow their folders ----------------
+# ---------------- install the allowed apps (LibreOffice) + allow their folders ----------------
 if ((-not $Undo) -and $InstallApps -and (-not $ListOnly)) {
-    Write-Host "Installing LibreOffice + SumatraPDF via winget (skipped if already present)..." -ForegroundColor Cyan
+    Write-Host "Installing LibreOffice via winget (skipped if already present)..." -ForegroundColor Cyan
     try { winget install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
     catch { Write-Host "  LibreOffice install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
-    try { winget install --exact --id SumatraPDF.SumatraPDF --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
-    catch { Write-Host "  SumatraPDF install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+# best-effort: remove any previously installed SumatraPDF (this build uses the built-in PDF browser + default handler)
+if ((-not $Undo) -and (-not $ListOnly)) {
+    try { winget uninstall --id SumatraPDF.SumatraPDF --silent --accept-source-agreements | Out-Null }
+    catch { Write-Host "  SumatraPDF uninstall skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 # resolve exe paths if the defaults are not present (search everywhere winget may have put them)
 if (-not (Test-Path $LibreOfficeExe)) {
     $hit = Get-ChildItem "C:\Program Files\LibreOffice","C:\Program Files (x86)\LibreOffice","$env:ProgramData\Microsoft\WinGet\Packages" -Recurse -Filter soffice.exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($hit) { $LibreOfficeExe = $hit.FullName }
 }
-if (-not (Test-Path $PdfViewerExe)) {
-    $hit = Get-ChildItem "C:\Program Files\SumatraPDF","C:\Program Files (x86)\SumatraPDF","$env:ProgramData\Microsoft\WinGet\Packages","$env:LOCALAPPDATA\SumatraPDF","$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "SumatraPDF*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
-    if ($hit) { $PdfViewerExe = $hit.FullName }
-}
-# if SumatraPDF only exists per-user (inaccessible to the kiosk user), copy it machine-wide so it always runs
-if ((Test-Path $PdfViewerExe) -and ($PdfViewerExe -match '(?i)\\Users\\')) {
-    $dst = "C:\Program Files\SumatraPDF"
-    New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    $srcDir = Split-Path $PdfViewerExe -Parent
-    Copy-Item -Path (Join-Path $srcDir '*') -Destination $dst -Recurse -Force -ErrorAction SilentlyContinue
-    $machineExe = Join-Path $dst (Split-Path $PdfViewerExe -Leaf)
-    if (Test-Path $machineExe) { $PdfViewerExe = $machineExe }
-}
 # allow the app folders so the deny-scan below does NOT block them
 if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $LibreOfficeExe -Parent) -Parent) }
-if (Test-Path $PdfViewerExe)   { $AllowFolders += (Split-Path $PdfViewerExe -Parent) }
-Write-Host "Allowed apps -> LibreOffice: $LibreOfficeExe ; PDF: $PdfViewerExe" -ForegroundColor Green
+Write-Host "Allowed apps -> LibreOffice: $LibreOfficeExe" -ForegroundColor Green
 
 # ---------------- build the program list ----------------
 $sh = New-Object -ComObject WScript.Shell
@@ -428,14 +416,19 @@ $rc.L = 0; $rc.T = 0; $rc.R = $scr.Width; $rc.B = $scr.Height - $barH
 } catch {}
 $colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile = [System.Drawing.Color]::FromArgb(30,41,59)
-function New-Tile($text, $exe, $x, $y, $w, $h, $fs) {
+function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
   $b = New-Object System.Windows.Forms.Button
   $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
   $b.FlatStyle = "Flat"; $b.FlatAppearance.BorderSize = 0
   $b.ForeColor = [System.Drawing.Color]::White; $b.BackColor = $colTile
   $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", $fs)
-  $b.Cursor = "Hand"; $b.Tag = $exe
-  $b.Add_Click({ Start-Process -FilePath $this.Tag -ErrorAction SilentlyContinue })
+  $b.Cursor = "Hand"
+  $b.Tag = @{ Exe = $exe; Args = $tileArgs }
+  $b.Add_Click({
+    $t = $this.Tag
+    if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction SilentlyContinue }
+    else         { Start-Process -FilePath $t.Exe -ErrorAction SilentlyContinue }
+  })
   $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
   $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
   return $b
@@ -456,7 +449,7 @@ $sx = [int](($scr.Width - ($tw * 3 + $gap * 2)) / 2)
 $ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
 $bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22))
 $bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22))
-$bg.Controls.Add((New-Tile "PDF Viewer" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22))
+$bg.Controls.Add((New-Tile "PDF Files" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22 "__PDFARGS__"))
 $cred = New-Object System.Windows.Forms.Label
 $cred.Text = "Built by Shalom Karr (216) 451-6698"
 $cred.ForeColor = [System.Drawing.Color]::FromArgb(120,140,170)
@@ -471,7 +464,7 @@ $bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr
 $bar.BackColor = $colTile
 $bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12))
 $bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12))
-$bar.Controls.Add((New-Tile "PDF Viewer" "__PDF__" 466 12 200 48 12))
+$bar.Controls.Add((New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__"))
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
 $barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
@@ -483,9 +476,190 @@ $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
 } catch { $_ | Out-File "$env:TEMP\kioskbar-error.log" -Force }
 '@
-            $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $PdfViewerExe)
+            $kioskExe    = Join-Path $kiosk "kioskbar.exe"
+            $browserPs1  = Join-Path $kiosk "pdfbrowser.ps1"
+            $pdfArgs     = "-NoProfile -Sta -ExecutionPolicy Bypass -File `"$browserPs1`""
+            $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $kioskExe).Replace('__PDFARGS__', $pdfArgs)
             $barPs1 = Join-Path $kiosk "kioskbar.ps1"
             Set-Content -Path $barPs1 -Value $barBody -Encoding ASCII
+
+            # embed the read-only PDF-only Documents browser and write it into the locked kiosk folder
+            $browserBody = @'
+param([string]$Root = "__ROOT__")
+try {
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+if (-not (Test-Path -LiteralPath $Root)) {
+  New-Item -ItemType Directory -Force -Path $Root | Out-Null
+}
+$Root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\')
+
+$colBg    = [System.Drawing.Color]::FromArgb(15,23,42)
+$colTile  = [System.Drawing.Color]::FromArgb(30,41,59)
+$colHover = [System.Drawing.Color]::FromArgb(51,65,85)
+$colWhite = [System.Drawing.Color]::White
+$fontName = "Segoe UI"
+
+$script:current = $Root
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "PDF Files"
+$form.BackColor = $colBg
+$form.WindowState = "Maximized"
+$form.StartPosition = "CenterScreen"
+$form.MinimumSize = New-Object System.Drawing.Size(600, 400)
+
+# --- top bar ---
+$top = New-Object System.Windows.Forms.Panel
+$top.Dock = "Top"
+$top.Height = 64
+$top.BackColor = $colTile
+$form.Controls.Add($top)
+
+$btnUp = New-Object System.Windows.Forms.Button
+$btnUp.Text = "Up"
+$btnUp.SetBounds(12, 12, 90, 40)
+$btnUp.FlatStyle = "Flat"
+$btnUp.FlatAppearance.BorderSize = 0
+$btnUp.ForeColor = $colWhite
+$btnUp.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnUp.Font = New-Object System.Drawing.Font($fontName, 12)
+$btnUp.Cursor = "Hand"
+$top.Controls.Add($btnUp)
+
+$lblPath = New-Object System.Windows.Forms.Label
+$lblPath.ForeColor = $colWhite
+$lblPath.Font = New-Object System.Drawing.Font($fontName, 12)
+$lblPath.TextAlign = "MiddleLeft"
+$lblPath.SetBounds(116, 12, 700, 40)
+$lblPath.Anchor = "Top,Left,Right"
+$top.Controls.Add($lblPath)
+
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Text = "Close"
+$btnClose.FlatStyle = "Flat"
+$btnClose.FlatAppearance.BorderSize = 0
+$btnClose.ForeColor = $colWhite
+$btnClose.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnClose.Font = New-Object System.Drawing.Font($fontName, 12)
+$btnClose.Cursor = "Hand"
+$btnClose.Anchor = "Top,Right"
+$btnClose.SetBounds(($form.ClientSize.Width - 120), 12, 100, 40)
+$top.Controls.Add($btnClose)
+$btnClose.Add_Click({ $form.Close() })
+
+# --- list area ---
+$list = New-Object System.Windows.Forms.ListView
+$list.Dock = "Fill"
+$list.View = "Details"
+$list.FullRowSelect = $true
+$list.MultiSelect = $false
+$list.HeaderStyle = "None"
+$list.BackColor = $colBg
+$list.ForeColor = $colWhite
+$list.Font = New-Object System.Drawing.Font($fontName, 13)
+$list.BorderStyle = "None"
+$list.Columns.Add("Name", 900) | Out-Null
+$form.Controls.Add($list)
+$list.BringToFront()
+
+function Update-Up {
+  if ($script:current.TrimEnd('\') -ieq $Root) {
+    $btnUp.Enabled = $false
+  } else {
+    $btnUp.Enabled = $true
+  }
+}
+
+function Get-RelPath {
+  $c = $script:current.TrimEnd('\')
+  if ($c -ieq $Root) { return "\" }
+  $rel = $c.Substring($Root.Length)
+  if (-not $rel.StartsWith('\')) { $rel = "\" + $rel }
+  return $rel
+}
+
+function Refresh-List {
+  $list.BeginUpdate()
+  $list.Items.Clear()
+  $lblPath.Text = Get-RelPath
+  Update-Up
+
+  $dirs = @()
+  try {
+    $dirs = Get-ChildItem -LiteralPath $script:current -Directory -Force -ErrorAction Stop | Sort-Object Name
+  } catch { $dirs = @() }
+  foreach ($d in $dirs) {
+    try {
+      $it = New-Object System.Windows.Forms.ListViewItem("[ ] " + $d.Name)
+      $it.Tag = @{ Type = "dir"; Path = $d.FullName }
+      $list.Items.Add($it) | Out-Null
+    } catch {}
+  }
+
+  $files = @()
+  try {
+    $files = Get-ChildItem -LiteralPath $script:current -File -Force -ErrorAction Stop | Where-Object { $_.Extension -ieq ".pdf" } | Sort-Object Name
+  } catch { $files = @() }
+  foreach ($f in $files) {
+    $it = New-Object System.Windows.Forms.ListViewItem($f.Name)
+    $it.Tag = @{ Type = "pdf"; Path = $f.FullName }
+    $list.Items.Add($it) | Out-Null
+  }
+  $list.EndUpdate()
+}
+
+function Open-Item($item) {
+  if ($null -eq $item) { return }
+  $info = $item.Tag
+  if ($null -eq $info) { return }
+  if ($info.Type -eq "dir") {
+    $script:current = $info.Path
+    Refresh-List
+  } elseif ($info.Type -eq "pdf") {
+    try { Start-Process -FilePath $info.Path -ErrorAction SilentlyContinue } catch {}
+  }
+}
+
+function Go-Up {
+  $c = $script:current.TrimEnd('\')
+  if ($c -ieq $Root) { return }
+  $parent = Split-Path -LiteralPath $c -Parent
+  if ([string]::IsNullOrEmpty($parent)) { return }
+  if ($parent.Length -lt $Root.Length) { $parent = $Root }
+  $script:current = $parent
+  Refresh-List
+}
+
+$btnUp.Add_Click({ Go-Up })
+
+$list.Add_MouseDoubleClick({
+  if ($list.SelectedItems.Count -gt 0) { Open-Item $list.SelectedItems[0] }
+})
+$list.Add_KeyDown({
+  if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+    if ($list.SelectedItems.Count -gt 0) { Open-Item $list.SelectedItems[0] }
+    $_.Handled = $true
+  } elseif ($_.KeyCode -eq [System.Windows.Forms.Keys]::Back) {
+    Go-Up
+    $_.Handled = $true
+  }
+})
+
+# hover effect on buttons
+$btnUp.Add_MouseEnter({ if ($this.Enabled) { $this.BackColor = $colHover } })
+$btnUp.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnClose.Add_MouseEnter({ $this.BackColor = $colHover })
+$btnClose.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+
+Refresh-List
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::Run($form)
+} catch { $_ | Out-File "$env:TEMP\pdfbrowser-error.log" -Force }
+'@
+            $browserBody = $browserBody.Replace('__ROOT__', "$OtzarProfile\Documents")
+            Set-Content -Path $browserPs1 -Value $browserBody -Encoding ASCII
 
             # the SHELL is a wscript relauncher: launches the bar once (STA) + keeps Otzar running.
             # If the bar ever fails, Otzar still runs full-screen (no black screen).
