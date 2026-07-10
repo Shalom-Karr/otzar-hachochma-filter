@@ -1,19 +1,22 @@
 <#
 .SYNOPSIS
-  Otzar Hachochma kiosk setup. Creates the locked-down "Otzar Hachochma" standard account
-  (no password), then blocks EVERY program except Otzar by NTFS-denying execute for that
-  user, applies kiosk policies, removes Store/Calculator/media apps, disables Bluetooth,
-  keeps printing + AnyDesk-incoming working, and sets Otzar as an auto-relaunching shell.
+  Otzar Hachochma kiosk setup (STEP 2). Locks the "Otzar Hachochma" account to Otzar +
+  LibreOffice + SumatraPDF: blocks every other program (NTFS deny), applies kiosk policies,
+  removes Store/media apps, disables Bluetooth, keeps printing + AnyDesk-incoming working,
+  builds the launcher UI, and removes the temporary password.
 
 .DESCRIPTION
-  Uses NTFS deny (reliable on Win 11 Pro) + per-user policies. Only the Otzar STANDARD
-  account is affected; your admin account is untouched. Run it, log into Otzar once to
-  build the profile, then run it again to apply the shell + policies (see readme.md).
+  STEP 1 is create.ps1 (makes the account with password 1234). Then log into that account
+  once (password 1234) so its profile builds and Otzar does first-run, sign out, and run
+  THIS script once as admin. Only the Otzar STANDARD account is affected; your admin account
+  is untouched.
 
+.EXAMPLE
+  .\create.ps1              # STEP 1: make the account (then log in once with 1234, sign out)
 .EXAMPLE
   .\setup.ps1 -ListOnly     # preview what would be blocked, make NO changes
 .EXAMPLE
-  .\setup.ps1               # create the account + apply the full lockdown
+  .\setup.ps1               # STEP 2: apply the full lockdown + launcher, remove the password
 .EXAMPLE
   .\uninstall.ps1           # reverse everything
 
@@ -49,19 +52,9 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
 }
 
-# ---- create the locked-down STANDARD account if it doesn't exist ----
-# First run: create it with a TEMPORARY password "1234" so you can log in once to build the profile.
-# Second run (step 2, near the end): the password is removed so the kiosk logs in with no password.
-if (-not $Undo) {
-    if (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue) {
-        Write-Host "Account '$OtzarUser' already exists." -ForegroundColor DarkGray
-    } else {
-        New-LocalUser -Name $OtzarUser -Password (ConvertTo-SecureString "1234" -AsPlainText -Force) -FullName $OtzarUser -Description "Locked-down Otzar Hachochma kiosk" -AccountNeverExpires -PasswordNeverExpires | Out-Null
-        Add-LocalGroupMember -Group "Users" -Member $OtzarUser   # STANDARD user, NOT an administrator
-        Write-Host "Created STANDARD account '$OtzarUser' with TEMPORARY password: 1234" -ForegroundColor Green
-        Write-Host "NEXT: log into '$OtzarUser' ONCE using password 1234 (builds its profile + Otzar first-run)," -ForegroundColor Yellow
-        Write-Host "      sign out, then run setup.ps1 AGAIN - it applies the shell/policies AND removes the password." -ForegroundColor Yellow
-    }
+# ---- the account must already exist (run create.ps1 first, then log into it once) ----
+if ((-not $Undo) -and (-not (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue))) {
+    throw "Account '$OtzarUser' not found. Run create.ps1 first, log into it once (password 1234), sign out, then run setup.ps1."
 }
 
 $acct = "$env:COMPUTERNAME\$OtzarUser"
@@ -92,19 +85,27 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
 # ---------------- install the allowed apps (LibreOffice + SumatraPDF) + allow their folders ----------------
 if ((-not $Undo) -and $InstallApps -and (-not $ListOnly)) {
     Write-Host "Installing LibreOffice + SumatraPDF via winget (skipped if already present)..." -ForegroundColor Cyan
-    try { winget install --exact --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+    try { winget install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
     catch { Write-Host "  LibreOffice install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
-    try { winget install --exact --id SumatraPDF.SumatraPDF --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+    try { winget install --exact --id SumatraPDF.SumatraPDF --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
     catch { Write-Host "  SumatraPDF install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
-# resolve exe paths if the defaults are not present
+# resolve exe paths if the defaults are not present (search everywhere winget may have put them)
 if (-not (Test-Path $LibreOfficeExe)) {
-    $hit = Get-ChildItem "C:\Program Files\LibreOffice","C:\Program Files (x86)\LibreOffice" -Recurse -Filter soffice.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    $hit = Get-ChildItem "C:\Program Files\LibreOffice","C:\Program Files (x86)\LibreOffice","$env:ProgramData\Microsoft\WinGet\Packages" -Recurse -Filter soffice.exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($hit) { $LibreOfficeExe = $hit.FullName }
 }
 if (-not (Test-Path $PdfViewerExe)) {
-    $hit = Get-ChildItem "C:\Program Files\SumatraPDF","C:\Program Files (x86)\SumatraPDF","$env:LOCALAPPDATA\SumatraPDF" -Recurse -Filter "SumatraPDF*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $hit = Get-ChildItem "C:\Program Files\SumatraPDF","C:\Program Files (x86)\SumatraPDF","$env:ProgramData\Microsoft\WinGet\Packages","$env:LOCALAPPDATA\SumatraPDF","$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "SumatraPDF*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
     if ($hit) { $PdfViewerExe = $hit.FullName }
+}
+# if SumatraPDF only exists per-user (inaccessible to the kiosk user), copy it machine-wide so it always runs
+if ((Test-Path $PdfViewerExe) -and ($PdfViewerExe -match '(?i)\\Users\\')) {
+    $dst = "C:\Program Files\SumatraPDF"
+    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    Copy-Item (Split-Path $PdfViewerExe -Parent)\* $dst -Recurse -Force -ErrorAction SilentlyContinue
+    $machineExe = Join-Path $dst (Split-Path $PdfViewerExe -Leaf)
+    if (Test-Path $machineExe) { $PdfViewerExe = $machineExe }
 }
 # allow the app folders so the deny-scan below does NOT block them
 if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $LibreOfficeExe -Parent) -Parent) }
@@ -186,12 +187,19 @@ $deny = @($found | Sort-Object -Unique | Where-Object {
     ( ($_ -notmatch '(?i)\\Users\\') -or ($_ -match '(?i)\\AppData\\Local\\Programs\\') )
 })
 
-# AnyDesk: block the USER from launching it. D:\ is allowed, so its AnyDesk.exe must be added explicitly.
-# Incoming/unattended still works because the AnyDesk service runs as SYSTEM (not this user).
-$adk = @()
-$adk += (Get-ChildItem 'D:\' -Filter 'AnyDesk*.exe' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-foreach ($f in @("C:\Program Files (x86)\AnyDesk\AnyDesk.exe","C:\Program Files\AnyDesk\AnyDesk.exe")) { if (Test-Path $f) { $adk += $f } }
-foreach ($a in $adk) { if ($deny -notcontains $a) { $deny += $a } }
+# Force-deny remote-access / unwanted tools even inside ALLOWED folders (D:\, C:\otzarApp, Program Files).
+# D:\ is broadly allowed, so a copy of TeamViewer/AnyDesk/VNC there would otherwise RUN - deny them by
+# name wherever they live. (Incoming AnyDesk still works: its service runs as SYSTEM, not as this user.)
+$blockNames = @('anydesk','teamviewer','tv_w32','tv_x64','tvnserver','winvnc','vncviewer','ultravnc','chromeremotedesktop','remotepc','splashtop','ammyy','supremo','getscreen','rustdesk')
+$forceDeny = @()
+foreach ($root in @('D:\', "$env:ProgramFiles", "${env:ProgramFiles(x86)}", "$env:ProgramData")) {
+    if (-not (Test-Path $root)) { continue }
+    Get-ChildItem $root -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | Where-Object {
+        $n = $_.Name.ToLower(); ($blockNames | Where-Object { $n -like "*$_*" }) -ne $null
+    } | ForEach-Object { $forceDeny += $_.FullName }
+}
+foreach ($a in ($forceDeny | Sort-Object -Unique)) { if ($deny -notcontains $a) { $deny += $a } }
+if ($forceDeny) { Write-Host "Force-denied remote-access tools: $($forceDeny.Count)" -ForegroundColor DarkGray }
 
 # Block File Explorer + the Settings app for the user (tested: the explorer.exe deny was NOT the cause
 # of the env-var error, so it's safe to keep it blocked). The kiosk shell + policies also remove any
@@ -336,10 +344,21 @@ if ($LASTEXITCODE -ne 0) {
         reg add $net   /v NC_RasConnect              /t REG_DWORD /d 0 /f | Out-Null
 
         # kiosk shell = a bottom LAUNCHER BAR (Otzar / LibreOffice / PDF Viewer) that also relaunches Otzar.
+        # find the REAL Otzar launcher: prefer the shortcut; else the HEBREW-named exe on D:\
+        # (Otzar's launcher has a non-ASCII name; TeamViewer/AnyDesk/our symlink are ASCII), shorter name = launcher not installer.
+        $badRe = '(?i)anydesk|teamviewer|otzarkiosk|tv_|winvnc|vncviewer|ultravnc|rustdesk|splashtop|remotepc|getscreen'
         $target = $null
-        if (Test-Path $ShellLnk) { $target = $sh.CreateShortcut($ShellLnk).TargetPath }
-        if ((-not $target) -or (-not (Test-Path $target)) -or ($target -match 'OtzarKiosk')) {
-            $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'anydesk|otzarkiosk' } | Select-Object -First 1).FullName
+        if (Test-Path $ShellLnk) {
+            $t = $sh.CreateShortcut($ShellLnk).TargetPath
+            if ($t -and (Test-Path $t) -and ($t -notmatch $badRe)) { $target = $t }
+        }
+        if (-not $target) {
+            $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue |
+                Where-Object { ($_.Name -notmatch $badRe) -and ($_.BaseName -match '[^\x00-\x7F]') } |
+                Sort-Object { $_.Name.Length } | Select-Object -First 1).FullName
+        }
+        if (-not $target) {
+            $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch $badRe } | Select-Object -First 1).FullName
         }
         if ($target) {
             $drive = [System.IO.Path]::GetPathRoot($target)
@@ -446,6 +465,16 @@ $bg.Add_Shown({ Start-Process "__OTZAR__" -ErrorAction SilentlyContinue })
         net user "$OtzarUser" "" 2>$null | Out-Null
         Write-Host "Removed the temporary password - '$OtzarUser' now logs in with NO password." -ForegroundColor Green
     }
+}
+
+# ---------------- clean the Otzar profile: keep Documents, remove Desktop + other user folders ----------------
+if ((-not $Undo) -and (Test-Path $OtzarProfile)) {
+    # keep Documents + system/AppData folders and Windows junctions (ReparsePoint); delete the rest (Desktop, Downloads, Music, Pictures, Videos, ...)
+    $keep = @('Documents','My Documents','AppData','Application Data','Local Settings','Cookies','NetHood','PrintHood','Recent','SendTo','Start Menu','Templates')
+    Get-ChildItem $OtzarProfile -Force -Directory -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Name -notin $keep) -and (-not ($_.Attributes.ToString() -match 'ReparsePoint'))
+    } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Host "Cleaned '$OtzarUser' profile (removed Desktop + other folders; kept Documents)." -ForegroundColor Green
 }
 
 Write-Host "`nDone. Reboot or sign into '$OtzarUser' to verify." -ForegroundColor Magenta
