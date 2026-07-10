@@ -37,6 +37,9 @@ param(
         "YourPhone","CrossDevice","WindowsMaps","MixedReality","WindowsAlarms","SoundRecorder",
         "Clipchamp","Todos","PowerAutomateDesktop","WindowsCamera","FeedbackHub","549981C3F5F10","Copilot"
     ),
+    [bool]$InstallApps      = $true,   # winget-install LibreOffice + SumatraPDF
+    [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
+    [string]$PdfViewerExe   = "C:\Program Files\SumatraPDF\SumatraPDF.exe",
     [switch]$ListOnly,
     [switch]$Undo
 )
@@ -83,6 +86,28 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
         icacls $Path /remove:d "$acct" 2>$null | Out-Null
     }
 }
+
+# ---------------- install the allowed apps (LibreOffice + SumatraPDF) + allow their folders ----------------
+if ((-not $Undo) -and $InstallApps -and (-not $ListOnly)) {
+    Write-Host "Installing LibreOffice + SumatraPDF via winget (skipped if already present)..." -ForegroundColor Cyan
+    try { winget install --exact --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+    catch { Write-Host "  LibreOffice install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+    try { winget install --exact --id SumatraPDF.SumatraPDF --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+    catch { Write-Host "  SumatraPDF install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+# resolve exe paths if the defaults are not present
+if (-not (Test-Path $LibreOfficeExe)) {
+    $hit = Get-ChildItem "C:\Program Files\LibreOffice","C:\Program Files (x86)\LibreOffice" -Recurse -Filter soffice.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($hit) { $LibreOfficeExe = $hit.FullName }
+}
+if (-not (Test-Path $PdfViewerExe)) {
+    $hit = Get-ChildItem "C:\Program Files\SumatraPDF","C:\Program Files (x86)\SumatraPDF","$env:LOCALAPPDATA\SumatraPDF" -Recurse -Filter "SumatraPDF*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($hit) { $PdfViewerExe = $hit.FullName }
+}
+# allow the app folders so the deny-scan below does NOT block them
+if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $LibreOfficeExe -Parent) -Parent) }
+if (Test-Path $PdfViewerExe)   { $AllowFolders += (Split-Path $PdfViewerExe -Parent) }
+Write-Host "Allowed apps -> LibreOffice: $LibreOfficeExe ; PDF: $PdfViewerExe" -ForegroundColor Green
 
 # ---------------- build the program list ----------------
 $sh = New-Object -ComObject WScript.Shell
@@ -308,51 +333,84 @@ if ($LASTEXITCODE -ne 0) {
         reg add $net   /v NC_PersonalFirewallConfig  /t REG_DWORD /d 0 /f | Out-Null
         reg add $net   /v NC_RasConnect              /t REG_DWORD /d 0 /f | Out-Null
 
-        # kiosk shell = a RELAUNCHER loop so closing Otzar immediately reopens it (no black screen).
+        # kiosk shell = a bottom LAUNCHER BAR (Otzar / LibreOffice / PDF Viewer) that also relaunches Otzar.
         $target = $null
         if (Test-Path $ShellLnk) { $target = $sh.CreateShortcut($ShellLnk).TargetPath }
         if (-not $target) { $target = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'anydesk' } | Select-Object -First 1).FullName }
         if ($target) {
-            $drive = [System.IO.Path]::GetPathRoot($target)                       # e.g. D:\
-            # ASCII pointer to the Hebrew-named exe (so the .vbs stays pure ASCII)
-            $link = Join-Path $drive "OtzarKiosk.exe"
+            $drive = [System.IO.Path]::GetPathRoot($target)
+            $link = Join-Path $drive "OtzarKiosk.exe"     # ASCII pointer to the Hebrew-named exe
             try {
                 if (Test-Path $link) { Remove-Item $link -Force -ErrorAction SilentlyContinue }
                 New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop | Out-Null
             } catch { $link = $null }
             $appPath = if ($link) { $link } else { $target }
 
-            # relauncher folder on the allowed drive: a copy of wscript + a loop script
             $kiosk = Join-Path $drive "Kiosk"
             New-Item -ItemType Directory -Path $kiosk -Force | Out-Null
-            Copy-Item "$env:windir\System32\wscript.exe" (Join-Path $kiosk "wscript.exe") -Force
-            $vbs = Join-Path $kiosk "relaunch.vbs"
-            $dl      = $drive.Substring(0,2).ToLower()   # e.g. d:
-            $kioskLc = $kiosk.ToLower()                  # e.g. d:\kiosk
-            $kLen    = $kiosk.Length
-            # Poll: only relaunch when NO Otzar process (any exe on the Otzar drive, except the relauncher) is running.
-            # This survives Otzar's launcher forking into a second process and its startup dialogs.
-            $vbsBody = @"
-On Error Resume Next
-Set sh = CreateObject("WScript.Shell")
-Set svc = GetObject("winmgmts:\\.\root\cimv2")
-Do
-  running = False
-  For Each p In svc.ExecQuery("Select Name from Win32_Process")
-    If InStr(LCase("" & p.Name), "otzar") > 0 Then running = True
-  Next
-  If Not running Then sh.Run "$appPath", 1, False
-  WScript.Sleep 5000
-Loop
+            # a renamed copy of powershell (System32 powershell is denied to the user) runs the bar
+            Copy-Item "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe" (Join-Path $kiosk "kioskbar.exe") -Force
+
+            $barBody = @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$scr = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$barH = 72
+try {
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WA {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
+  [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, ref RECT r, uint c);
+}
 "@
-            Set-Content -Path $vbs -Value $vbsBody -Encoding ASCII
-            # lock the folder so the user can run but NOT edit the loop (read+execute only)
+$rc = New-Object WA+RECT
+$rc.L = 0; $rc.T = 0; $rc.R = $scr.Width; $rc.B = $scr.Height - $barH
+[WA]::SystemParametersInfo(0x2F, 0, [ref]$rc, 3) | Out-Null
+} catch {}
+$form = New-Object System.Windows.Forms.Form
+$form.FormBorderStyle = "None"
+$form.TopMost = $true
+$form.ShowInTaskbar = $false
+$form.StartPosition = "Manual"
+$form.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
+$form.BackColor = [System.Drawing.Color]::FromArgb(28,28,38)
+function New-LaunchButton($text, $exe, $x) {
+  $b = New-Object System.Windows.Forms.Button
+  $b.Text = $text
+  $b.SetBounds($x, 8, 260, 56)
+  $b.FlatStyle = "Flat"
+  $b.ForeColor = [System.Drawing.Color]::White
+  $b.BackColor = [System.Drawing.Color]::FromArgb(58,58,82)
+  $b.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+  $b.Tag = $exe
+  $b.Add_Click({ Start-Process -FilePath $this.Tag -ErrorAction SilentlyContinue })
+  $form.Controls.Add($b)
+}
+New-LaunchButton "Otzar Hachochma" "__OTZAR__" 20
+New-LaunchButton "LibreOffice" "__LIBRE__" 300
+New-LaunchButton "PDF Viewer" "__PDF__" 580
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 5000
+$timer.Add_Tick({
+  $run = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match "otzar" }
+  if (-not $run) { Start-Process "__OTZAR__" -ErrorAction SilentlyContinue }
+})
+$timer.Start()
+Start-Process "__OTZAR__" -ErrorAction SilentlyContinue
+[System.Windows.Forms.Application]::Run($form)
+'@
+            $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $PdfViewerExe)
+            $bar = Join-Path $kiosk "kioskbar.ps1"
+            Set-Content -Path $bar -Value $barBody -Encoding ASCII
+            # lock the folder: user can run/read but NOT edit the bar script
             icacls $kiosk /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${acct}:(OI)(CI)RX" | Out-Null
 
-            $shellCmd = (Join-Path $kiosk "wscript.exe") + " " + $vbs
+            $shellCmd = (Join-Path $kiosk "kioskbar.exe") + " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + $bar
             reg add $wl /v Shell /t REG_SZ /d $shellCmd /f | Out-Null
-            Write-Host "Policies set; relauncher shell = $shellCmd" -ForegroundColor Green
-            Write-Host "  (closing Otzar now reopens it automatically - no more black screen)" -ForegroundColor DarkGray
+            Write-Host "Policies set; launcher-bar shell = $shellCmd" -ForegroundColor Green
+            Write-Host "  (bottom bar: Otzar / LibreOffice / PDF Viewer; Otzar auto-relaunches)" -ForegroundColor DarkGray
         } else {
             Write-Host "Policies set; could NOT resolve the Otzar exe for the shell - pass -ShellLnk." -ForegroundColor Yellow
         }
