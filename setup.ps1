@@ -43,12 +43,20 @@ param(
     [bool]$InstallApps      = $true,   # winget-install LibreOffice
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
     [switch]$ListOnly,
-    [switch]$Undo
+    [switch]$Undo,
+    [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
+}
+
+# ---- self-update from GitHub (offline-safe; re-runs the new version if one exists) ----
+# Skipped for -ListOnly (preview makes no changes) and -Undo (teardown).
+if ((-not $NoUpdate) -and (-not $ListOnly) -and (-not $Undo)) {
+    $upd = Join-Path $PSScriptRoot 'updater.ps1'
+    if (Test-Path -LiteralPath $upd) { . $upd; Invoke-OtzarSelfUpdate -ScriptPath $PSCommandPath -BoundParams $PSBoundParameters }
 }
 
 # ---- the account must already exist (run create.ps1 first, then log into it once) ----
