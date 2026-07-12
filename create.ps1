@@ -16,11 +16,18 @@
 [CmdletBinding()]
 param(
     [string]$OtzarUser = "Otzar Hachochma",
-    [string]$Password  = "1234"
+    [string]$Password  = "1234",
+    [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
+}
+
+# ---- self-update from GitHub (offline-safe; re-runs the new version if one exists) ----
+if (-not $NoUpdate) {
+    $upd = Join-Path $PSScriptRoot 'updater.ps1'
+    if (Test-Path -LiteralPath $upd) { . $upd; Invoke-OtzarSelfUpdate -ScriptPath $PSCommandPath -BoundParams $PSBoundParameters }
 }
 
 if (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue) {
