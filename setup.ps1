@@ -420,10 +420,23 @@ $barH = 72
 try {
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class WA {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
   [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, ref RECT r, uint c);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint tid);
+  [DllImport("user32.dll")] public static extern IntPtr LoadKeyboardLayout(string id, uint flags);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
 }
 "@
 $rc = New-Object WA+RECT
@@ -436,23 +449,62 @@ function Log($m) { try { Add-Content -LiteralPath "$LogDir\kiosk.log" -Value ("{
 Log "launcher started"
 $colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile = [System.Drawing.Color]::FromArgb(30,41,59)
-function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
+
+# --- find a running window: by process-name regex OR by window-title substring ---
+function Find-AppWindow($procRe, $titleMatch) {
+  $script:hitHwnd = [IntPtr]::Zero
+  $cb = [WA+EnumProc]{
+    param($h, $l)
+    if ($script:hitHwnd -ne [IntPtr]::Zero) { return $true }
+    if (-not [WA]::IsWindowVisible($h)) { return $true }
+    $len = [WA]::GetWindowTextLength($h)
+    if ($len -le 0) { return $true }
+    $sb = New-Object System.Text.StringBuilder ($len + 1)
+    [WA]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null
+    $wt = $sb.ToString()
+    if ($titleMatch) {
+      if ($wt -eq $titleMatch) { $script:hitHwnd = $h; return $false }
+    }
+    if ($procRe) {
+      $pid2 = 0
+      [WA]::GetWindowThreadProcessId($h, [ref]$pid2) | Out-Null
+      try {
+        $pr = Get-Process -Id $pid2 -ErrorAction Stop
+        if ($pr.ProcessName -match $procRe) { $script:hitHwnd = $h; return $false }
+      } catch {}
+    }
+    return $true
+  }.GetNewClosure()
+  try { [WA]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null } catch {}
+  return $script:hitHwnd
+}
+
+function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titleMatch) {
   $b = New-Object System.Windows.Forms.Button
   $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
   $b.FlatStyle = "Flat"; $b.FlatAppearance.BorderSize = 0
   $b.ForeColor = [System.Drawing.Color]::White; $b.BackColor = $colTile
   $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", $fs)
   $b.Cursor = "Hand"
-  $b.Tag = @{ Exe = $exe; Args = $tileArgs }
+  $b.Tag = @{ Exe = $exe; Args = $tileArgs; Proc = $procMatch; Title = $titleMatch }
   $b.Add_Click({
     $t = $this.Tag
-    if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; return }
     $btn = $this; $orig = $btn.Text
     $btn.Enabled = $false; $btn.Text = "Opening..."
     try {
-      if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
-      else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
-      Log "launched: $($t.Exe) $($t.Args)"
+      # reshow, don't relaunch: if the app already has a window, bring it forward
+      $hwnd = [IntPtr]::Zero
+      try { $hwnd = Find-AppWindow $t.Proc $t.Title } catch { Log "find-window err: $($_.Exception.Message)" }
+      if ($hwnd -ne [IntPtr]::Zero) {
+        [WA]::ShowWindow($hwnd, 9) | Out-Null   # SW_RESTORE
+        [WA]::SetForegroundWindow($hwnd) | Out-Null
+        Log "reshown: $($t.Exe) ($text)"
+      } else {
+        if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; $btn.Enabled = $true; $btn.Text = $orig; return }
+        if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
+        else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
+        Log "launched: $($t.Exe) $($t.Args)"
+      }
     } catch { Log "FAILED: $($t.Exe) -> $($_.Exception.Message)" }
     # grey the button out with a brief "Opening..." so people don't rapid-fire click
     $tmr = New-Object System.Windows.Forms.Timer
@@ -465,6 +517,41 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
   $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
   return $b
 }
+
+# --- language toggle: switch the foreground app's keyboard layout Hebrew <-> English ---
+$script:hebHkl = [IntPtr]::Zero
+$script:engHkl = [IntPtr]::Zero
+try {
+  $script:hebHkl = [WA]::LoadKeyboardLayout("0000040d", 0)   # Hebrew
+  $script:engHkl = [WA]::LoadKeyboardLayout("00000409", 0)   # English (US)
+} catch { Log "LoadKeyboardLayout failed: $($_.Exception.Message)" }
+
+function Get-ForeLang {
+  # returns "HE" or "EN" for the foreground window's current layout (best-effort)
+  try {
+    $fg = [WA]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { return "EN" }
+    $p = 0
+    $tid = [WA]::GetWindowThreadProcessId($fg, [ref]$p)
+    $hkl = [WA]::GetKeyboardLayout($tid)
+    $lid = $hkl.ToInt64() -band 0xFFFF
+    if ($lid -eq 0x040d) { return "HE" } else { return "EN" }
+  } catch { return "EN" }
+}
+
+function Toggle-Lang {
+  try {
+    $fg = [WA]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { Log "toggle-lang: no foreground window"; return }
+    $cur = Get-ForeLang
+    if ($cur -eq "HE") { $target = $script:engHkl } else { $target = $script:hebHkl }
+    if ($target -eq [IntPtr]::Zero) { Log "toggle-lang: target HKL not loaded"; return }
+    # WM_INPUTLANGCHANGEREQUEST = 0x0050, flag 1 = post-to-window
+    [WA]::PostMessage($fg, 0x0050, [IntPtr]1, $target) | Out-Null
+    Log ("toggle-lang: " + $cur + " -> " + $(if ($cur -eq "HE") { "EN" } else { "HE" }))
+  } catch { Log "toggle-lang failed: $($_.Exception.Message)" }
+}
+
 # full-screen launcher "desktop" (visible when no app is open)
 $bg = New-Object System.Windows.Forms.Form
 $bg.FormBorderStyle = "None"; $bg.StartPosition = "Manual"
@@ -479,9 +566,9 @@ $bg.Controls.Add($title)
 $tw = 300; $th = 190; $gap = 44
 $sx = [int](($scr.Width - ($tw * 3 + $gap * 2)) / 2)
 $ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
-$bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22))
-$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22))
-$bg.Controls.Add((New-Tile "PDF Files" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22 "__PDFARGS__"))
+$bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22 $null "(?i)otzar" $null))
+$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22 $null "(?i)soffice" $null))
+$bg.Controls.Add((New-Tile "PDF Files" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22 "__PDFARGS__" $null "PDF Files"))
 $cred = New-Object System.Windows.Forms.Label
 $cred.Text = "Built by Shalom Karr (216) 451-6698"
 $cred.ForeColor = [System.Drawing.Color]::FromArgb(120,140,170)
@@ -494,16 +581,34 @@ $bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
 $bar.StartPosition = "Manual"
 $bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
 $bar.BackColor = $colTile
-$bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12))
-$bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12))
-$bar.Controls.Add((New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__"))
+$bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null))
+$bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice" $null))
+$bar.Controls.Add((New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"))
+# language toggle button (left of the credit label)
+$btnLang = New-Object System.Windows.Forms.Button
+$btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 490), 12, 90, 48)
+$btnLang.FlatStyle = "Flat"; $btnLang.FlatAppearance.BorderSize = 0
+$btnLang.ForeColor = [System.Drawing.Color]::White
+$btnLang.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnLang.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
+$btnLang.Cursor = "Hand"
+$btnLang.Anchor = "Top,Right"
+$btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+$btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
+$bar.Controls.Add($btnLang)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
 $barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
 $barCred.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 380), 20, 360, 30)
+$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 390), 20, 370, 30)
 $barCred.Anchor = "Top,Right"
 $bar.Controls.Add($barCred)
+# ~1s timer to keep the language label in sync with the focused app
+$langTmr = New-Object System.Windows.Forms.Timer
+$langTmr.Interval = 1000
+$langTmr.Add_Tick({ try { $btnLang.Text = Get-ForeLang } catch {} })
+$langTmr.Start()
 $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
@@ -517,59 +622,91 @@ $bar.Show()
 
             # embed the read-only PDF-only Documents browser and write it into the locked kiosk folder
             $browserBody = @'
-param([string]$Root = "__ROOT__")
+param([string]$ProfileDir = "__ROOT__")
 try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-if (-not (Test-Path -LiteralPath $Root)) {
-  New-Item -ItemType Directory -Force -Path $Root | Out-Null
-}
-$Root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\')
-
 $LogDir = "C:\Users\Public\Documents\OtzarKiosk"
 try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
 function Log($m) { try { Add-Content -LiteralPath "$LogDir\pdfbrowser.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
-Log ("pdfbrowser started, root=" + $Root)
+
+$ProfileDir = $ProfileDir.TrimEnd('\')
+$docs = Join-Path $ProfileDir "Documents"
+$dl   = Join-Path $ProfileDir "Downloads"
+foreach ($r in @($docs, $dl)) {
+  try { if (-not (Test-Path -LiteralPath $r)) { New-Item -ItemType Directory -Force -Path $r | Out-Null } } catch {}
+}
+try { $docs = (Get-Item -LiteralPath $docs).FullName.TrimEnd('\') } catch {}
+try { $dl   = (Get-Item -LiteralPath $dl).FullName.TrimEnd('\') } catch {}
+Log ("pdfbrowser started, docs=" + $docs + " dl=" + $dl)
+
+# the two allowed roots (label -> path)
+$roots = @(
+  @{ Name = "Documents"; Path = $docs },
+  @{ Name = "Downloads"; Path = $dl }
+)
 
 $colBg    = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile  = [System.Drawing.Color]::FromArgb(30,41,59)
 $colHover = [System.Drawing.Color]::FromArgb(51,65,85)
 $colWhite = [System.Drawing.Color]::White
+$colMuted = [System.Drawing.Color]::FromArgb(148,163,184)
 $fontName = "Segoe UI"
 
-$script:current = $Root
+# $null current = the two-root "home"; otherwise the full path we are inside
+$script:current = $null
+
+function Get-RootFor($path) {
+  # returns the root hashtable that $path lives under, or $null
+  if ($null -eq $path) { return $null }
+  $p = $path.TrimEnd('\')
+  foreach ($r in $roots) {
+    $rp = $r.Path.TrimEnd('\')
+    if ($p -ieq $rp) { return $r }
+    if ($p.ToLower().StartsWith($rp.ToLower() + '\')) { return $r }
+  }
+  return $null
+}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "PDF Files"
 $form.BackColor = $colBg
 $form.WindowState = "Maximized"
 $form.StartPosition = "CenterScreen"
-$form.MinimumSize = New-Object System.Drawing.Size(600, 400)
+$form.MinimumSize = New-Object System.Drawing.Size(700, 480)
 
-# --- top bar ---
+# --- top header bar ---
 $top = New-Object System.Windows.Forms.Panel
 $top.Dock = "Top"
-$top.Height = 64
+$top.Height = 108
 $top.BackColor = $colTile
 $form.Controls.Add($top)
 
+$lblTitle = New-Object System.Windows.Forms.Label
+$lblTitle.Text = "PDF Files"
+$lblTitle.ForeColor = $colWhite
+$lblTitle.Font = New-Object System.Drawing.Font($fontName + " Semibold", 20)
+$lblTitle.TextAlign = "MiddleLeft"
+$lblTitle.SetBounds(24, 10, 400, 40)
+$top.Controls.Add($lblTitle)
+
 $btnUp = New-Object System.Windows.Forms.Button
 $btnUp.Text = "Up"
-$btnUp.SetBounds(12, 12, 90, 40)
+$btnUp.SetBounds(24, 56, 120, 44)
 $btnUp.FlatStyle = "Flat"
 $btnUp.FlatAppearance.BorderSize = 0
 $btnUp.ForeColor = $colWhite
 $btnUp.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
-$btnUp.Font = New-Object System.Drawing.Font($fontName, 12)
+$btnUp.Font = New-Object System.Drawing.Font($fontName, 13)
 $btnUp.Cursor = "Hand"
 $top.Controls.Add($btnUp)
 
 $lblPath = New-Object System.Windows.Forms.Label
-$lblPath.ForeColor = $colWhite
-$lblPath.Font = New-Object System.Drawing.Font($fontName, 12)
+$lblPath.ForeColor = $colMuted
+$lblPath.Font = New-Object System.Drawing.Font($fontName, 13)
 $lblPath.TextAlign = "MiddleLeft"
-$lblPath.SetBounds(116, 12, 700, 40)
+$lblPath.SetBounds(160, 56, 800, 44)
 $lblPath.Anchor = "Top,Left,Right"
 $top.Controls.Add($lblPath)
 
@@ -578,15 +715,18 @@ $btnClose.Text = "Close"
 $btnClose.FlatStyle = "Flat"
 $btnClose.FlatAppearance.BorderSize = 0
 $btnClose.ForeColor = $colWhite
-$btnClose.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
-$btnClose.Font = New-Object System.Drawing.Font($fontName, 12)
+$btnClose.BackColor = [System.Drawing.Color]::FromArgb(190,60,60)
+$btnClose.Font = New-Object System.Drawing.Font($fontName + " Semibold", 14)
 $btnClose.Cursor = "Hand"
 $btnClose.Anchor = "Top,Right"
-$btnClose.SetBounds(($form.ClientSize.Width - 120), 12, 100, 40)
+$btnClose.SetBounds(($form.ClientSize.Width - 180), 30, 150, 52)
 $top.Controls.Add($btnClose)
 $btnClose.Add_Click({ $form.Close() })
 
-# --- list area ---
+# --- list area (large touch-friendly rows via an ImageList height hack) ---
+$imgs = New-Object System.Windows.Forms.ImageList
+$imgs.ImageSize = New-Object System.Drawing.Size(1, 48)
+
 $list = New-Object System.Windows.Forms.ListView
 $list.Dock = "Fill"
 $list.View = "Details"
@@ -595,33 +735,45 @@ $list.MultiSelect = $false
 $list.HeaderStyle = "None"
 $list.BackColor = $colBg
 $list.ForeColor = $colWhite
-$list.Font = New-Object System.Drawing.Font($fontName, 13)
+$list.Font = New-Object System.Drawing.Font($fontName, 14)
 $list.BorderStyle = "None"
-$list.Columns.Add("Name", 900) | Out-Null
+$list.SmallImageList = $imgs
+$list.Columns.Add("Name", 1000) | Out-Null
 $form.Controls.Add($list)
 $list.BringToFront()
 
 function Update-Up {
-  if ($script:current.TrimEnd('\') -ieq $Root) {
-    $btnUp.Enabled = $false
-  } else {
-    $btnUp.Enabled = $true
-  }
+  if ($null -eq $script:current) { $btnUp.Enabled = $false } else { $btnUp.Enabled = $true }
 }
 
-function Get-RelPath {
+function Get-DisplayPath {
+  if ($null -eq $script:current) { return "Home" }
+  $r = Get-RootFor $script:current
+  if ($null -eq $r) { return "Home" }
+  $rp = $r.Path.TrimEnd('\')
   $c = $script:current.TrimEnd('\')
-  if ($c -ieq $Root) { return "\" }
-  $rel = $c.Substring($Root.Length)
-  if (-not $rel.StartsWith('\')) { $rel = "\" + $rel }
-  return $rel
+  if ($c -ieq $rp) { return $r.Name }
+  $rel = $c.Substring($rp.Length)
+  return ($r.Name + $rel)
 }
 
 function Refresh-List {
   $list.BeginUpdate()
   $list.Items.Clear()
-  $lblPath.Text = Get-RelPath
+  $lblPath.Text = Get-DisplayPath
   Update-Up
+
+  if ($null -eq $script:current) {
+    # two-root home
+    foreach ($r in $roots) {
+      $it = New-Object System.Windows.Forms.ListViewItem("[Folder]  " + $r.Name)
+      $it.Tag = @{ Type = "dir"; Path = $r.Path }
+      $it.ForeColor = $colWhite
+      $list.Items.Add($it) | Out-Null
+    }
+    $list.EndUpdate()
+    return
+  }
 
   $dirs = @()
   try {
@@ -629,8 +781,9 @@ function Refresh-List {
   } catch { $dirs = @() }
   foreach ($d in $dirs) {
     try {
-      $it = New-Object System.Windows.Forms.ListViewItem("[ ] " + $d.Name)
+      $it = New-Object System.Windows.Forms.ListViewItem("[Folder]  " + $d.Name)
       $it.Tag = @{ Type = "dir"; Path = $d.FullName }
+      $it.ForeColor = $colWhite
       $list.Items.Add($it) | Out-Null
     } catch {}
   }
@@ -640,8 +793,9 @@ function Refresh-List {
     $files = Get-ChildItem -LiteralPath $script:current -File -Force -ErrorAction Stop | Where-Object { $_.Extension -ieq ".pdf" } | Sort-Object Name
   } catch { $files = @() }
   foreach ($f in $files) {
-    $it = New-Object System.Windows.Forms.ListViewItem($f.Name)
+    $it = New-Object System.Windows.Forms.ListViewItem("[PDF]     " + $f.Name)
     $it.Tag = @{ Type = "pdf"; Path = $f.FullName }
+    $it.ForeColor = [System.Drawing.Color]::FromArgb(203,213,225)
     $list.Items.Add($it) | Out-Null
   }
   $list.EndUpdate()
@@ -660,11 +814,21 @@ function Open-Item($item) {
 }
 
 function Go-Up {
+  if ($null -eq $script:current) { return }
+  $r = Get-RootFor $script:current
+  if ($null -eq $r) { $script:current = $null; Refresh-List; return }
   $c = $script:current.TrimEnd('\')
-  if ($c -ieq $Root) { return }
+  $rp = $r.Path.TrimEnd('\')
+  if ($c -ieq $rp) {
+    # at a root -> back to the two-root home
+    $script:current = $null
+    Refresh-List
+    return
+  }
   $parent = Split-Path -LiteralPath $c -Parent
-  if ([string]::IsNullOrEmpty($parent)) { return }
-  if ($parent.Length -lt $Root.Length) { $parent = $Root }
+  if ([string]::IsNullOrEmpty($parent) -or ($parent.Length -lt $rp.Length)) { $parent = $rp }
+  # never climb above the root
+  if (-not (($parent.TrimEnd('\') -ieq $rp) -or ($parent.ToLower().StartsWith($rp.ToLower() + '\')))) { $parent = $rp }
   $script:current = $parent
   Refresh-List
 }
@@ -687,15 +851,15 @@ $list.Add_KeyDown({
 # hover effect on buttons
 $btnUp.Add_MouseEnter({ if ($this.Enabled) { $this.BackColor = $colHover } })
 $btnUp.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
-$btnClose.Add_MouseEnter({ $this.BackColor = $colHover })
-$btnClose.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnClose.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(220,80,80) })
+$btnClose.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(190,60,60) })
 
 Refresh-List
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::Run($form)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\pdfbrowser-error.log" -Force } catch {} }
 '@
-            $browserBody = $browserBody.Replace('__ROOT__', "$OtzarProfile\Documents")
+            $browserBody = $browserBody.Replace('__ROOT__', "$OtzarProfile")
             Set-Content -Path $browserPs1 -Value $browserBody -Encoding ASCII
 
             # the SHELL is a wscript relauncher: launches the bar once (STA) + keeps Otzar running.
@@ -735,8 +899,8 @@ Loop
 
 # ---------------- clean the Otzar profile: keep Documents, remove Desktop + other user folders ----------------
 if ((-not $Undo) -and (Test-Path $OtzarProfile)) {
-    # keep Documents + system/AppData folders and Windows junctions (ReparsePoint); delete the rest (Desktop, Downloads, Music, Pictures, Videos, ...)
-    $keep = @('Documents','My Documents','AppData','Application Data','Local Settings','Cookies','NetHood','PrintHood','Recent','SendTo','Start Menu','Templates')
+    # keep Documents + Downloads + system/AppData folders and Windows junctions (ReparsePoint); delete the rest (Desktop, Music, Pictures, Videos, ...)
+    $keep = @('Documents','My Documents','Downloads','AppData','Application Data','Local Settings','Cookies','NetHood','PrintHood','Recent','SendTo','Start Menu','Templates')
     Get-ChildItem $OtzarProfile -Force -Directory -ErrorAction SilentlyContinue | Where-Object {
         ($_.Name -notin $keep) -and (-not ($_.Attributes.ToString() -match 'ReparsePoint'))
     } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
