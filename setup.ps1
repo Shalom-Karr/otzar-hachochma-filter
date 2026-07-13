@@ -40,7 +40,7 @@ param(
         "YourPhone","CrossDevice","WindowsMaps","MixedReality","WindowsAlarms","SoundRecorder",
         "Clipchamp","Todos","PowerAutomateDesktop","WindowsCamera","FeedbackHub","549981C3F5F10","Copilot"
     ),
-    [bool]$InstallApps      = $true,   # winget-install LibreOffice
+    [bool]$InstallApps      = $false,  # winget-install LibreOffice ONLY if missing (off by default - avoids network/winget; pass -InstallApps $true to allow)
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
     [switch]$ListOnly,
     [switch]$Undo,
@@ -59,6 +59,15 @@ if ((-not $NoUpdate) -and (-not $ListOnly) -and (-not $Undo)) {
     if (Test-Path -LiteralPath $upd) { . $upd; Invoke-OtzarSelfUpdate -ScriptPath $PSCommandPath -BoundParams $PSBoundParameters }
 }
 
+# ---- setup progress log: prints to console AND appends to a file the admin can read later ----
+$PubLog = "C:\Users\Public\Documents\OtzarKiosk"
+try { New-Item -ItemType Directory -Path $PubLog -Force | Out-Null } catch {}
+function Slog([string]$m, [string]$color = "Gray") {
+    try { Write-Host $m -ForegroundColor $color } catch { Write-Host $m }
+    try { Add-Content -LiteralPath "$PubLog\setup.log" -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {}
+}
+Slog "===== setup.ps1 starting: user='$OtzarUser' ListOnly=$ListOnly Undo=$Undo InstallApps=$InstallApps =====" "Cyan"
+
 # ---- the account must already exist (run create.ps1 first, then log into it once) ----
 if ((-not $Undo) -and (-not (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue))) {
     throw "Account '$OtzarUser' not found. Run create.ps1 first, log into it once (password 1234), sign out, then run setup.ps1."
@@ -71,7 +80,7 @@ catch { $sid = $null; Write-Host "WARN: could not resolve SID for $acct" -Foregr
 # use the account's ACTUAL profile path (handles a duplicate 'Name.COMPUTER' profile)
 if ($sid) {
     $realProfile = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue).LocalPath
-    if ($realProfile) { $OtzarProfile = $realProfile; Write-Host "Using profile: $OtzarProfile" -ForegroundColor DarkGray }
+    if ($realProfile) { $OtzarProfile = $realProfile; Slog "Using profile: $OtzarProfile" "DarkGray" }
 }
 
 function Test-Allowed([string]$p) {
