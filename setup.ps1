@@ -96,15 +96,28 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
 }
 
 # ---------------- install the allowed apps (LibreOffice) + allow their folders ----------------
-if ((-not $Undo) -and $InstallApps -and (-not $ListOnly) -and (-not (Test-Path $LibreOfficeExe))) {
-    Write-Host "LibreOffice not found - installing via winget (this can be slow)..." -ForegroundColor Cyan
-    try { winget install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
-    catch { Write-Host "  LibreOffice install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+# winget can HANG on a slow/firewalled network or an interactive prompt, so every winget call is
+# time-boxed (killed on timeout) and --disable-interactivity so it can never freeze setup.
+function Invoke-WingetTimed([string]$ArgLine, [int]$TimeoutSec, [string]$Label) {
+    try {
+        $p = Start-Process -FilePath "winget" -ArgumentList ($ArgLine + " --disable-interactivity") -NoNewWindow -PassThru -ErrorAction Stop
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            Write-Host "  $Label timed out after ${TimeoutSec}s - skipping (network?)." -ForegroundColor Yellow
+            try { $p.Kill() } catch {}
+        }
+    } catch { Write-Host "  $Label - winget unavailable, skipping: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
-# best-effort: remove any previously installed SumatraPDF (this build uses the built-in PDF browser + default handler)
+if ((-not $Undo) -and $InstallApps -and (-not $ListOnly) -and (-not (Test-Path $LibreOfficeExe))) {
+    Write-Host "LibreOffice not found - installing via winget (time-boxed; can be slow)..." -ForegroundColor Cyan
+    Invoke-WingetTimed "install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements" 600 "LibreOffice install"
+}
+# best-effort: remove any previously installed SumatraPDF - ONLY if it is actually present (never call winget needlessly)
 if ((-not $Undo) -and (-not $ListOnly)) {
-    try { winget uninstall --id SumatraPDF.SumatraPDF --silent --accept-source-agreements | Out-Null }
-    catch { Write-Host "  SumatraPDF uninstall skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+    $sumatra = @("$env:ProgramFiles\SumatraPDF\SumatraPDF.exe","${env:ProgramFiles(x86)}\SumatraPDF\SumatraPDF.exe","$env:LOCALAPPDATA\SumatraPDF\SumatraPDF.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($sumatra) {
+        Write-Host "Removing old SumatraPDF (time-boxed)..." -ForegroundColor Cyan
+        Invoke-WingetTimed "uninstall --id SumatraPDF.SumatraPDF --silent --accept-source-agreements" 180 "SumatraPDF uninstall"
+    }
 }
 # resolve exe paths if the defaults are not present (search everywhere winget may have put them)
 if (-not (Test-Path $LibreOfficeExe)) {
