@@ -617,16 +617,19 @@ function Show-TilePopup($tile) {
     $rowH = 34; $pad = 6
     $script:pop.Width = 360
     $y = $pad
+    $closeW = 28   # width of the per-row "X" close button on the right
     foreach ($w in $wins) {
+      $rowW = 360 - $pad * 2
       $row = New-Object System.Windows.Forms.Label
-      $row.Text = (Fit-Text $w.Title 46)
+      $row.Text = (Fit-Text $w.Title 42)
       $row.ForeColor = [System.Drawing.Color]::White
       $row.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
       $row.Font = New-Object System.Drawing.Font("Segoe UI", 11)
       $row.TextAlign = "MiddleLeft"
-      $row.SetBounds($pad, $y, (360 - $pad * 2), $rowH)
+      $row.SetBounds($pad, $y, $rowW, $rowH)
       $row.Cursor = "Hand"
-      $row.Padding = New-Object System.Windows.Forms.Padding(8,0,8,0)
+      # leave room on the right so the "X" button never overlaps the title text
+      $row.Padding = New-Object System.Windows.Forms.Padding(8,0,($closeW + 6),0)
       $row.Tag = $w.Hwnd
       $row.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
       $row.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
@@ -639,6 +642,36 @@ function Show-TilePopup($tile) {
         $script:pop.Hide(); $script:popTile = $null
       })
       $script:pop.Controls.Add($row)
+      # per-row "X" close button (its own control, drawn on TOP of the row so it does
+      # NOT trigger the row's focus/activate click). Posts WM_CLOSE (graceful) to the hwnd.
+      $closeBtn = New-Object System.Windows.Forms.Button
+      $closeBtn.Text = "X"
+      $closeBtn.FlatStyle = "Flat"; $closeBtn.FlatAppearance.BorderSize = 0
+      $closeBtn.ForeColor = [System.Drawing.Color]::White
+      $closeBtn.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+      $closeBtn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+      $closeBtn.Cursor = "Hand"
+      $closeBtn.TabStop = $false
+      $cy = $y + [int](($rowH - $closeW) / 2)
+      $closeBtn.SetBounds(($pad + $rowW - $closeW - 2), $cy, $closeW, $closeW)
+      # keep the hwnd AND the owning tile on the button so the handler can close + refresh
+      $closeBtn.Tag = @{ Hwnd = $w.Hwnd; Tile = $tile; Title = $w.Title }
+      $closeBtn.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(190,60,60) })
+      $closeBtn.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+      $closeBtn.Add_Click({
+        try {
+          $d = $this.Tag
+          $hwnd = $d.Hwnd
+          # WM_CLOSE = 0x0010 - graceful close (lets the app prompt to save). NOT a kill.
+          [WA]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+          Log "popup close window: $($d.Title)"
+          # refresh: re-enumerate this tile's windows and rebuild the popup rows
+          # (Show-TilePopup hides the popup itself when the tile now has 0 windows)
+          Show-TilePopup $d.Tile
+        } catch { Log "popup close err: $($_.Exception.Message)" }
+      })
+      $script:pop.Controls.Add($closeBtn)
+      $closeBtn.BringToFront()
       $y += $rowH
     }
     $script:pop.Height = $y + $pad
