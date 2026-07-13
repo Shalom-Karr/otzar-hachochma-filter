@@ -114,6 +114,10 @@ if (-not (Test-Path $LibreOfficeExe)) {
 # allow the app folders so the deny-scan below does NOT block them
 if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $LibreOfficeExe -Parent) -Parent) }
 Write-Host "Allowed apps -> LibreOffice: $LibreOfficeExe" -ForegroundColor Green
+# log to Public Documents so the admin can review setup + launcher activity later
+$PubLog = "C:\Users\Public\Documents\OtzarKiosk"
+try { New-Item -ItemType Directory -Path $PubLog -Force | Out-Null } catch {}
+try { Add-Content "$PubLog\setup.log" -Value ("{0}  LibreOffice='{1}' exists={2} allowed={3}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $LibreOfficeExe, (Test-Path $LibreOfficeExe), (Test-Allowed $LibreOfficeExe)) } catch {}
 
 # ---------------- build the program list ----------------
 $sh = New-Object -ComObject WScript.Shell
@@ -422,6 +426,10 @@ $rc = New-Object WA+RECT
 $rc.L = 0; $rc.T = 0; $rc.R = $scr.Width; $rc.B = $scr.Height - $barH
 [WA]::SystemParametersInfo(0x2F, 0, [ref]$rc, 3) | Out-Null
 } catch {}
+$LogDir = "C:\Users\Public\Documents\OtzarKiosk"
+try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
+function Log($m) { try { Add-Content -LiteralPath "$LogDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
+Log "launcher started"
 $colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile = [System.Drawing.Color]::FromArgb(30,41,59)
 function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
@@ -434,8 +442,12 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
   $b.Tag = @{ Exe = $exe; Args = $tileArgs }
   $b.Add_Click({
     $t = $this.Tag
-    if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction SilentlyContinue }
-    else         { Start-Process -FilePath $t.Exe -ErrorAction SilentlyContinue }
+    if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; return }
+    try {
+      if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
+      else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
+      Log "launched: $($t.Exe) $($t.Args)"
+    } catch { Log "FAILED: $($t.Exe) -> $($_.Exception.Message)" }
   })
   $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
   $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
@@ -482,7 +494,7 @@ $barCred.Anchor = "Top,Right"
 $bar.Controls.Add($barCred)
 $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
-} catch { $_ | Out-File "$env:TEMP\kioskbar-error.log" -Force }
+} catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
 '@
             $kioskExe    = Join-Path $kiosk "kioskbar.exe"
             $browserPs1  = Join-Path $kiosk "pdfbrowser.ps1"
@@ -502,6 +514,11 @@ if (-not (Test-Path -LiteralPath $Root)) {
   New-Item -ItemType Directory -Force -Path $Root | Out-Null
 }
 $Root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\')
+
+$LogDir = "C:\Users\Public\Documents\OtzarKiosk"
+try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
+function Log($m) { try { Add-Content -LiteralPath "$LogDir\pdfbrowser.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
+Log ("pdfbrowser started, root=" + $Root)
 
 $colBg    = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile  = [System.Drawing.Color]::FromArgb(30,41,59)
@@ -626,7 +643,7 @@ function Open-Item($item) {
     $script:current = $info.Path
     Refresh-List
   } elseif ($info.Type -eq "pdf") {
-    try { Start-Process -FilePath $info.Path -ErrorAction SilentlyContinue } catch {}
+    try { Start-Process -FilePath $info.Path -ErrorAction Stop; Log ("opened PDF: " + $info.Path) } catch { Log ("FAILED to open PDF: " + $info.Path + " -> " + $_.Exception.Message) }
   }
 }
 
@@ -664,7 +681,7 @@ $btnClose.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30
 Refresh-List
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::Run($form)
-} catch { $_ | Out-File "$env:TEMP\pdfbrowser-error.log" -Force }
+} catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\pdfbrowser-error.log" -Force } catch {} }
 '@
             $browserBody = $browserBody.Replace('__ROOT__', "$OtzarProfile\Documents")
             Set-Content -Path $browserPs1 -Value $browserBody -Encoding ASCII
