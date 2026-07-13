@@ -70,7 +70,8 @@ Both `create.ps1` and `setup.ps1` **check GitHub for a newer version on startup*
 exists, download it and re-run themselves — so a machine set up from an old copy always applies
 the latest scripts.
 
-- **How it decides:** it compares the local `VERSION` file against the `VERSION` on `main` at
+- **How it decides:** it compares the `$KioskVersion` in the local `setup.ps1` against the
+  `$KioskVersion` in `setup.ps1` on `main` at
   <https://github.com/Shalom-Karr/otzar-hachochma-filter>. If the remote is newer it downloads
   the branch zip, overwrites the local files in place, and re-runs the same command with the
   same arguments. No `git` needed on the machine.
@@ -85,9 +86,10 @@ the latest scripts.
 
 ### Releasing an update (repo maintainer)
 
-Bump the `VERSION` file (semantic version, e.g. `1.0.0` -> `1.0.1`) and push to `main` along
-with your changes. Any machine that runs `create.ps1`/`setup.ps1` afterward pulls it
-automatically. Changes pushed **without** bumping `VERSION` will not trigger the auto-update.
+Bump `$KioskVersion` at the top of `setup.ps1` (semantic version, e.g. `1.0.0` -> `1.0.1`) and
+push to `main` along with your changes. Any machine that runs `create.ps1`/`setup.ps1` afterward
+pulls it automatically. Changes pushed **without** bumping `$KioskVersion` will not trigger the
+auto-update.
 
 ## Escape hatch (how you, the admin, get back in)
 

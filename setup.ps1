@@ -47,6 +47,8 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
+$KioskVersion = '1.2.2'   # single source of truth for the self-updater (replaces the old VERSION file)
+
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
@@ -104,42 +106,56 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
     }
 }
 
-# ---------------- install the allowed apps (LibreOffice) + allow their folders ----------------
-# winget can HANG on a slow/firewalled network or an interactive prompt, so every winget call is
-# time-boxed (killed on timeout) and --disable-interactivity so it can never freeze setup.
+# ---------------- find the allowed apps (LibreOffice) locally FIRST; use winget only as a last resort ----------------
+# winget can HANG on a slow/firewalled network, so we detect LibreOffice on-disk (NO network) and only fall back to
+# winget if it is genuinely missing AND -InstallApps was requested. Every winget call is time-boxed + non-interactive.
+function Find-LibreOffice([string]$preferred) {
+    $cands = @($preferred,
+        "C:\Program Files\LibreOffice\program\soffice.exe",
+        "C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        "$env:ProgramFiles\LibreOffice\program\soffice.exe",
+        "${env:ProgramFiles(x86)}\LibreOffice\program\soffice.exe")
+    foreach ($c in $cands) { if ($c -and (Test-Path -LiteralPath $c)) { return (Get-Item -LiteralPath $c).FullName } }
+    return $null
+}
 function Invoke-WingetTimed([string]$ArgLine, [int]$TimeoutSec, [string]$Label) {
+    Slog "  $Label - calling winget (time-boxed ${TimeoutSec}s)..." "Cyan"
     try {
         $p = Start-Process -FilePath "winget" -ArgumentList ($ArgLine + " --disable-interactivity") -NoNewWindow -PassThru -ErrorAction Stop
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-            Write-Host "  $Label timed out after ${TimeoutSec}s - skipping (network?)." -ForegroundColor Yellow
+            Slog "  $Label TIMED OUT after ${TimeoutSec}s - killed, skipping (network?)." "Yellow"
             try { $p.Kill() } catch {}
-        }
-    } catch { Write-Host "  $Label - winget unavailable, skipping: $($_.Exception.Message)" -ForegroundColor Yellow }
+        } else { Slog "  $Label - winget exited (code $($p.ExitCode))." "Gray" }
+    } catch { Slog "  $Label - winget not available, skipping: $($_.Exception.Message)" "Yellow" }
 }
-if ((-not $Undo) -and $InstallApps -and (-not $ListOnly) -and (-not (Test-Path $LibreOfficeExe))) {
-    Write-Host "LibreOffice not found - installing via winget (time-boxed; can be slow)..." -ForegroundColor Cyan
-    Invoke-WingetTimed "install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements" 600 "LibreOffice install"
-}
-# best-effort: remove any previously installed SumatraPDF - ONLY if it is actually present (never call winget needlessly)
-if ((-not $Undo) -and (-not $ListOnly)) {
-    $sumatra = @("$env:ProgramFiles\SumatraPDF\SumatraPDF.exe","${env:ProgramFiles(x86)}\SumatraPDF\SumatraPDF.exe","$env:LOCALAPPDATA\SumatraPDF\SumatraPDF.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($sumatra) {
-        Write-Host "Removing old SumatraPDF (time-boxed)..." -ForegroundColor Cyan
-        Invoke-WingetTimed "uninstall --id SumatraPDF.SumatraPDF --silent --accept-source-agreements" 180 "SumatraPDF uninstall"
+
+if (-not $Undo) {
+    Slog "Checking for LibreOffice on disk (no network call)..." "Cyan"
+    $lo = Find-LibreOffice $LibreOfficeExe
+    if ($lo) {
+        $LibreOfficeExe = $lo
+        Slog "LibreOffice found at $LibreOfficeExe - winget NOT needed." "Green"
+    } elseif ($InstallApps -and (-not $ListOnly)) {
+        Slog "LibreOffice missing and -InstallApps set -> installing via winget (may be slow)." "Yellow"
+        Invoke-WingetTimed "install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements" 600 "LibreOffice install"
+        $lo = Find-LibreOffice $LibreOfficeExe
+        if ($lo) { $LibreOfficeExe = $lo; Slog "LibreOffice installed at $LibreOfficeExe." "Green" }
+        else     { Slog "LibreOffice STILL not found after winget - its launcher button will be skipped." "Yellow" }
+    } else {
+        Slog "LibreOffice not installed. Skipping winget (pass -InstallApps `$true to auto-install, or install it manually and re-run). Its button will be skipped." "Yellow"
+    }
+
+    # remove an old SumatraPDF ONLY if it is actually on disk (local check first - winget runs only if it is present)
+    if (-not $ListOnly) {
+        $sumatra = @("$env:ProgramFiles\SumatraPDF\SumatraPDF.exe","${env:ProgramFiles(x86)}\SumatraPDF\SumatraPDF.exe","$env:LOCALAPPDATA\SumatraPDF\SumatraPDF.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($sumatra) { Slog "Old SumatraPDF present at $sumatra - removing." "Cyan"; Invoke-WingetTimed "uninstall --id SumatraPDF.SumatraPDF --silent --accept-source-agreements" 180 "SumatraPDF uninstall" }
+        else          { Slog "SumatraPDF not installed - nothing to remove (no winget call)." "Gray" }
     }
 }
-# resolve exe paths if the defaults are not present (search everywhere winget may have put them)
-if (-not (Test-Path $LibreOfficeExe)) {
-    $hit = Get-ChildItem "C:\Program Files\LibreOffice","C:\Program Files (x86)\LibreOffice","$env:ProgramData\Microsoft\WinGet\Packages" -Recurse -Filter soffice.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($hit) { $LibreOfficeExe = $hit.FullName }
-}
-# allow the app folders so the deny-scan below does NOT block them
+
+# allow the app folder so the deny-scan below does NOT block LibreOffice
 if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $LibreOfficeExe -Parent) -Parent) }
-Write-Host "Allowed apps -> LibreOffice: $LibreOfficeExe" -ForegroundColor Green
-# log to Public Documents so the admin can review setup + launcher activity later
-$PubLog = "C:\Users\Public\Documents\OtzarKiosk"
-try { New-Item -ItemType Directory -Path $PubLog -Force | Out-Null } catch {}
-try { Add-Content "$PubLog\setup.log" -Value ("{0}  LibreOffice='{1}' exists={2} allowed={3}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $LibreOfficeExe, (Test-Path $LibreOfficeExe), (Test-Allowed $LibreOfficeExe)) } catch {}
+Slog ("Allowed apps -> LibreOffice='{0}' exists={1} allowed={2}" -f $LibreOfficeExe, (Test-Path $LibreOfficeExe), (Test-Allowed $LibreOfficeExe)) "Green"
 
 # ---------------- build the program list ----------------
 $sh = New-Object -ComObject WScript.Shell
