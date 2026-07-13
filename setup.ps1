@@ -443,11 +443,19 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs) {
   $b.Add_Click({
     $t = $this.Tag
     if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; return }
+    $btn = $this; $orig = $btn.Text
+    $btn.Enabled = $false; $btn.Text = "Opening..."
     try {
       if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
       else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
       Log "launched: $($t.Exe) $($t.Args)"
     } catch { Log "FAILED: $($t.Exe) -> $($_.Exception.Message)" }
+    # grey the button out with a brief "Opening..." so people don't rapid-fire click
+    $tmr = New-Object System.Windows.Forms.Timer
+    $tmr.Interval = 4000
+    $tmr.Tag = @{ B = $btn; T = $orig }
+    $tmr.Add_Tick({ $x = $this.Tag; $x.B.Enabled = $true; $x.B.Text = $x.T; $this.Stop(); $this.Dispose() })
+    $tmr.Start()
   })
   $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
   $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
