@@ -343,6 +343,9 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $net   /v NC_PersonalFirewallConfig  /f 2>$null | Out-Null
         reg delete $net   /v NC_RasConnect              /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Windows\RemovableStorageDevices" /f 2>$null | Out-Null
+        # remove the custom .pdf handler (OtzarPDF ProgId + the .pdf Classes default)
+        reg delete "HKU\LockAll\Software\Classes\OtzarPDF" /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Classes\.pdf" /f 2>$null | Out-Null
         reg add    $wl    /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
         Write-Host "Policies removed, shell restored to explorer.exe." -ForegroundColor Green
     } else {
@@ -647,12 +650,30 @@ $roots = @(
   @{ Name = "Downloads"; Path = $dl }
 )
 
-$colBg    = [System.Drawing.Color]::FromArgb(15,23,42)
-$colTile  = [System.Drawing.Color]::FromArgb(30,41,59)
-$colHover = [System.Drawing.Color]::FromArgb(51,65,85)
-$colWhite = [System.Drawing.Color]::White
-$colMuted = [System.Drawing.Color]::FromArgb(148,163,184)
-$fontName = "Segoe UI"
+$colBg     = [System.Drawing.Color]::FromArgb(15,23,42)
+$colCard   = [System.Drawing.Color]::FromArgb(30,41,59)
+$colHover  = [System.Drawing.Color]::FromArgb(51,65,85)
+$colWhite  = [System.Drawing.Color]::White
+$colMuted  = [System.Drawing.Color]::FromArgb(148,163,184)
+$colFolder = [System.Drawing.Color]::FromArgb(250,204,21)
+$colPdf    = [System.Drawing.Color]::FromArgb(96,165,250)
+$fontName  = "Segoe UI"
+
+# find msedge.exe (app-mode viewer)
+$script:edge = $null
+foreach ($c in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")) {
+  if ($c -and (Test-Path -LiteralPath $c)) { $script:edge = $c; break }
+}
+
+function Open-Pdf($path) {
+  try {
+    if (-not $script:edge) { Log ("FAILED to open PDF (no msedge): " + $path); return }
+    $full = (Resolve-Path -LiteralPath $path).Path
+    $uri = ([System.Uri]$full).AbsoluteUri
+    Start-Process -FilePath $script:edge -ArgumentList ('--app=' + $uri) -ErrorAction Stop
+    Log ("opened PDF (app-mode): " + $path)
+  } catch { Log ("FAILED to open PDF: " + $path + " -> " + $_.Exception.Message) }
+}
 
 # $null current = the two-root "home"; otherwise the full path we are inside
 $script:current = $null
@@ -680,7 +701,7 @@ $form.MinimumSize = New-Object System.Drawing.Size(700, 480)
 $top = New-Object System.Windows.Forms.Panel
 $top.Dock = "Top"
 $top.Height = 108
-$top.BackColor = $colTile
+$top.BackColor = $colCard
 $form.Controls.Add($top)
 
 $lblTitle = New-Object System.Windows.Forms.Label
@@ -723,24 +744,63 @@ $btnClose.SetBounds(($form.ClientSize.Width - 180), 30, 150, 52)
 $top.Controls.Add($btnClose)
 $btnClose.Add_Click({ $form.Close() })
 
-# --- list area (large touch-friendly rows via an ImageList height hack) ---
-$imgs = New-Object System.Windows.Forms.ImageList
-$imgs.ImageSize = New-Object System.Drawing.Size(1, 48)
+# --- card area: a scrolling FlowLayoutPanel of tiles ---
+$flow = New-Object System.Windows.Forms.FlowLayoutPanel
+$flow.Dock = "Fill"
+$flow.AutoScroll = $true
+$flow.WrapContents = $true
+$flow.FlowDirection = "LeftToRight"
+$flow.BackColor = $colBg
+$flow.Padding = New-Object System.Windows.Forms.Padding(12)
+$form.Controls.Add($flow)
+$flow.BringToFront()
 
-$list = New-Object System.Windows.Forms.ListView
-$list.Dock = "Fill"
-$list.View = "Details"
-$list.FullRowSelect = $true
-$list.MultiSelect = $false
-$list.HeaderStyle = "None"
-$list.BackColor = $colBg
-$list.ForeColor = $colWhite
-$list.Font = New-Object System.Drawing.Font($fontName, 14)
-$list.BorderStyle = "None"
-$list.SmallImageList = $imgs
-$list.Columns.Add("Name", 1000) | Out-Null
-$form.Controls.Add($list)
-$list.BringToFront()
+function New-Card($kind, $name, $path) {
+  # $kind = "dir" or "pdf"
+  $card = New-Object System.Windows.Forms.Button
+  $card.Width = 200; $card.Height = 150
+  $card.Margin = New-Object System.Windows.Forms.Padding(12)
+  $card.FlatStyle = "Flat"
+  $card.FlatAppearance.BorderSize = 0
+  $card.BackColor = $colCard
+  $card.ForeColor = $colWhite
+  $card.Cursor = "Hand"
+  $card.TextAlign = "MiddleCenter"
+  $card.Font = New-Object System.Drawing.Font($fontName + " Semibold", 12)
+  if ($kind -eq "dir") { $tag = "FOLDER"; $accent = $colFolder } else { $tag = "PDF"; $accent = $colPdf }
+  $card.Text = $name
+  $card.Tag = @{ Type = $kind; Path = $path }
+
+  # accent label at the top of the card (FOLDER / PDF)
+  $lbl = New-Object System.Windows.Forms.Label
+  $lbl.Text = $tag
+  $lbl.ForeColor = $accent
+  $lbl.BackColor = [System.Drawing.Color]::Transparent
+  $lbl.Font = New-Object System.Drawing.Font($fontName + " Semibold", 10)
+  $lbl.TextAlign = "MiddleCenter"
+  $lbl.SetBounds(0, 8, 200, 22)
+  $lbl.Cursor = "Hand"
+  $card.Controls.Add($lbl)
+
+  $onEnter = { $this.BackColor = $colHover }.GetNewClosure()
+  $onLeave = { $this.BackColor = $colCard }.GetNewClosure()
+  $card.Add_MouseEnter($onEnter)
+  $card.Add_MouseLeave($onLeave)
+  # clicking the label should behave like clicking the card
+  $lbl.Add_Click({ $this.Parent.PerformClick() })
+
+  $card.Add_Click({
+    $info = $this.Tag
+    if ($null -eq $info) { return }
+    if ($info.Type -eq "dir") {
+      $script:current = $info.Path
+      Refresh-List
+    } elseif ($info.Type -eq "pdf") {
+      Open-Pdf $info.Path
+    }
+  })
+  return $card
+}
 
 function Update-Up {
   if ($null -eq $script:current) { $btnUp.Enabled = $false } else { $btnUp.Enabled = $true }
@@ -758,20 +818,17 @@ function Get-DisplayPath {
 }
 
 function Refresh-List {
-  $list.BeginUpdate()
-  $list.Items.Clear()
+  $flow.SuspendLayout()
+  $flow.Controls.Clear()
   $lblPath.Text = Get-DisplayPath
   Update-Up
 
   if ($null -eq $script:current) {
     # two-root home
     foreach ($r in $roots) {
-      $it = New-Object System.Windows.Forms.ListViewItem("[Folder]  " + $r.Name)
-      $it.Tag = @{ Type = "dir"; Path = $r.Path }
-      $it.ForeColor = $colWhite
-      $list.Items.Add($it) | Out-Null
+      $flow.Controls.Add((New-Card "dir" $r.Name $r.Path))
     }
-    $list.EndUpdate()
+    $flow.ResumeLayout()
     return
   }
 
@@ -780,12 +837,7 @@ function Refresh-List {
     $dirs = Get-ChildItem -LiteralPath $script:current -Directory -Force -ErrorAction Stop | Sort-Object Name
   } catch { $dirs = @() }
   foreach ($d in $dirs) {
-    try {
-      $it = New-Object System.Windows.Forms.ListViewItem("[Folder]  " + $d.Name)
-      $it.Tag = @{ Type = "dir"; Path = $d.FullName }
-      $it.ForeColor = $colWhite
-      $list.Items.Add($it) | Out-Null
-    } catch {}
+    try { $flow.Controls.Add((New-Card "dir" $d.Name $d.FullName)) } catch {}
   }
 
   $files = @()
@@ -793,24 +845,9 @@ function Refresh-List {
     $files = Get-ChildItem -LiteralPath $script:current -File -Force -ErrorAction Stop | Where-Object { $_.Extension -ieq ".pdf" } | Sort-Object Name
   } catch { $files = @() }
   foreach ($f in $files) {
-    $it = New-Object System.Windows.Forms.ListViewItem("[PDF]     " + $f.Name)
-    $it.Tag = @{ Type = "pdf"; Path = $f.FullName }
-    $it.ForeColor = [System.Drawing.Color]::FromArgb(203,213,225)
-    $list.Items.Add($it) | Out-Null
+    try { $flow.Controls.Add((New-Card "pdf" $f.Name $f.FullName)) } catch {}
   }
-  $list.EndUpdate()
-}
-
-function Open-Item($item) {
-  if ($null -eq $item) { return }
-  $info = $item.Tag
-  if ($null -eq $info) { return }
-  if ($info.Type -eq "dir") {
-    $script:current = $info.Path
-    Refresh-List
-  } elseif ($info.Type -eq "pdf") {
-    try { Start-Process -FilePath $info.Path -ErrorAction Stop; Log ("opened PDF: " + $info.Path) } catch { Log ("FAILED to open PDF: " + $info.Path + " -> " + $_.Exception.Message) }
-  }
+  $flow.ResumeLayout()
 }
 
 function Go-Up {
@@ -835,19 +872,6 @@ function Go-Up {
 
 $btnUp.Add_Click({ Go-Up })
 
-$list.Add_MouseDoubleClick({
-  if ($list.SelectedItems.Count -gt 0) { Open-Item $list.SelectedItems[0] }
-})
-$list.Add_KeyDown({
-  if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
-    if ($list.SelectedItems.Count -gt 0) { Open-Item $list.SelectedItems[0] }
-    $_.Handled = $true
-  } elseif ($_.KeyCode -eq [System.Windows.Forms.Keys]::Back) {
-    Go-Up
-    $_.Handled = $true
-  }
-})
-
 # hover effect on buttons
 $btnUp.Add_MouseEnter({ if ($this.Enabled) { $this.BackColor = $colHover } })
 $btnUp.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
@@ -861,6 +885,51 @@ Refresh-List
 '@
             $browserBody = $browserBody.Replace('__ROOT__', "$OtzarProfile")
             Set-Content -Path $browserPs1 -Value $browserBody -Encoding ASCII
+
+            # embed the PDF-only launch shim: opens a .pdf in an Edge APP WINDOW (no address bar / tabs),
+            # and REFUSES to open anything that is not a .pdf. Registered below as the .pdf handler.
+            $pdfOpenBody = @'
+param([string]$Path)
+
+$LogDir = "C:\Users\Public\Documents\OtzarKiosk"
+try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
+function Log($m) { try { Add-Content -LiteralPath "$LogDir\pdfopen.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
+
+try {
+  if ([string]::IsNullOrEmpty($Path)) { Log "empty path -> exit"; return }
+
+  $ext = [System.IO.Path]::GetExtension($Path)
+  if ($ext -notmatch '^\.pdf$') { Log ("BLOCKED non-pdf: " + $Path); return }
+
+  if (-not (Test-Path -LiteralPath $Path)) { Log ("missing: " + $Path); return }
+
+  $full = (Resolve-Path -LiteralPath $Path).Path
+  $uri = ([System.Uri]$full).AbsoluteUri
+
+  $edge = $null
+  foreach ($c in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")) {
+    if ($c -and (Test-Path -LiteralPath $c)) { $edge = $c; break }
+  }
+  if (-not $edge) { Log "msedge.exe not found -> exit"; return }
+
+  Start-Process -FilePath $edge -ArgumentList ('--app=' + $uri)
+  Log ("opened (app-mode): " + $uri)
+} catch { Log ("EXCEPTION: " + $_.Exception.Message) }
+'@
+            $pdfOpenPs1 = Join-Path $kiosk "pdfopen.ps1"
+            Set-Content -Path $pdfOpenPs1 -Value $pdfOpenBody -Encoding ASCII
+
+            # Register pdfopen.ps1 as the kiosk user's .pdf handler so Otzar's own PDF opens route through it
+            # (and thus open in a no-navigation Edge app window). $kioskExe is the copied powershell.exe.
+            # Best-effort: if Windows later regenerates a UserChoice for .pdf, the association can revert to
+            # Edge-normal, but the custom PDF browser always opens PDFs via the app-mode path regardless.
+            $pdfCmd = '"' + $kioskExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $pdfOpenPs1 + '" "%1"'
+            reg add "HKU\LockAll\Software\Classes\OtzarPDF" /ve /t REG_SZ /d "Otzar PDF" /f | Out-Null
+            reg add "HKU\LockAll\Software\Classes\OtzarPDF\shell\open\command" /ve /t REG_SZ /d $pdfCmd /f | Out-Null
+            reg add "HKU\LockAll\Software\Classes\.pdf" /ve /t REG_SZ /d "OtzarPDF" /f | Out-Null
+            reg add "HKU\LockAll\Software\Classes\.pdf\OpenWithProgids" /v OtzarPDF /t REG_NONE /f | Out-Null
+            # remove any forced UserChoice so the Classes fallback applies (ignore if absent)
+            reg delete "HKU\LockAll\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\UserChoice" /f 2>$null | Out-Null
 
             # the SHELL is a wscript relauncher: launches the bar once (STA) + keeps Otzar running.
             # If the bar ever fails, Otzar still runs full-screen (no black screen).
