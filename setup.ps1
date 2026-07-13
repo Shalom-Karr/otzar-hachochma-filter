@@ -96,8 +96,8 @@ function Set-ExeDeny([string]$Path, [bool]$Deny) {
 }
 
 # ---------------- install the allowed apps (LibreOffice) + allow their folders ----------------
-if ((-not $Undo) -and $InstallApps -and (-not $ListOnly)) {
-    Write-Host "Installing LibreOffice via winget (skipped if already present)..." -ForegroundColor Cyan
+if ((-not $Undo) -and $InstallApps -and (-not $ListOnly) -and (-not (Test-Path $LibreOfficeExe))) {
+    Write-Host "LibreOffice not found - installing via winget (this can be slow)..." -ForegroundColor Cyan
     try { winget install --exact --id TheDocumentFoundation.LibreOffice --scope machine --silent --accept-package-agreements --accept-source-agreements | Out-Null }
     catch { Write-Host "  LibreOffice install skipped/failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
@@ -356,8 +356,12 @@ if ($LASTEXITCODE -ne 0) {
         reg add $srch1 /v DisableSearchBoxSuggestions /t REG_DWORD /d 1 /f | Out-Null
         reg add $srch2 /v BingSearchEnabled          /t REG_DWORD /d 0 /f | Out-Null
         # keep Edge as the PDF viewer but block ALL web browsing (local files only)
-        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 1 /t REG_SZ /d "*" /f | Out-Null
-        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLAllowlist" /v 1 /t REG_SZ /d "file:///*" /f | Out-Null
+        # block the WEB (http/https/ftp/ws) but leave local files (file://) so exported PDFs still open
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 2 /t REG_SZ /d "https://*" /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 3 /t REG_SZ /d "ftp://*"   /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 4 /t REG_SZ /d "ws://*"    /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 5 /t REG_SZ /d "wss://*"   /f | Out-Null
         # Keyboard layouts for the Otzar user (built into Windows; switch with Left Alt+Shift / Win+Space)
         reg add "HKU\LockAll\Keyboard Layout\Preload" /v 1 /t REG_SZ /d "0000040d" /f | Out-Null   # Hebrew (primary)
         reg add "HKU\LockAll\Keyboard Layout\Preload" /v 2 /t REG_SZ /d "00000409" /f | Out-Null   # English (secondary)
