@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.2.3'   # single source of truth for the self-updater (replaces the old VERSION file)
+$KioskVersion = '1.3.0'   # single source of truth for the self-updater (replaces the old VERSION file)
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -522,6 +522,142 @@ function Find-AppWindow($procRe, $titleMatch) {
   return $script:hitHwnd
 }
 
+# --- enumerate ALL matching windows: by process-name regex OR by window-title equality ---
+# returns an array of @{ Hwnd = <IntPtr>; Title = <string> } for every visible top-level
+# window (non-empty title) whose owning process name matches $procRe OR whose title -eq $titleMatch.
+function Get-AppWindows($procRe, $titleMatch) {
+  $script:winList = New-Object System.Collections.ArrayList
+  $cb2 = [WA+EnumProc]{
+    param($h, $l)
+    if (-not [WA]::IsWindowVisible($h)) { return $true }
+    $len = [WA]::GetWindowTextLength($h)
+    if ($len -le 0) { return $true }
+    $sb = New-Object System.Text.StringBuilder ($len + 1)
+    [WA]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null
+    $wt = $sb.ToString()
+    if ([string]::IsNullOrEmpty($wt)) { return $true }
+    $match = $false
+    if ($titleMatch -and ($wt -eq $titleMatch)) { $match = $true }
+    if ((-not $match) -and $procRe) {
+      $pid3 = 0
+      [WA]::GetWindowThreadProcessId($h, [ref]$pid3) | Out-Null
+      try {
+        $pr = Get-Process -Id $pid3 -ErrorAction Stop
+        if ($pr.ProcessName -match $procRe) { $match = $true }
+      } catch {}
+    }
+    if ($match) { [void]$script:winList.Add(@{ Hwnd = $h; Title = $wt }) }
+    return $true
+  }.GetNewClosure()
+  try { [WA]::EnumWindows($cb2, [IntPtr]::Zero) | Out-Null } catch {}
+  return @($script:winList.ToArray())
+}
+
+# --- bring a specific window forward (IsIconic-aware restore) ---
+function Show-Window($hwnd) {
+  try {
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    if ([WA]::IsIconic($hwnd)) { [WA]::ShowWindow($hwnd, 9) | Out-Null }  # SW_RESTORE
+    [WA]::BringWindowToTop($hwnd) | Out-Null
+    [WA]::SetForegroundWindow($hwnd) | Out-Null
+  } catch { Log "show-window err: $($_.Exception.Message)" }
+}
+
+# ================= mini-taskbar: shared hover popup + per-tile badges =================
+# ONE reusable borderless TopMost popup listing a tile's open windows; rebuilt each hover.
+$script:pop = New-Object System.Windows.Forms.Form
+$script:pop.FormBorderStyle = "None"
+$script:pop.TopMost = $true
+$script:pop.ShowInTaskbar = $false
+$script:pop.StartPosition = "Manual"
+$script:pop.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$script:pop.Width = 360
+$script:pop.Height = 40
+$script:pop.Visible = $false
+$script:popTile = $null   # the tile the popup currently belongs to
+
+# hide the popup only when the cursor is over NEITHER the tile NOR the popup
+$script:popTmr = New-Object System.Windows.Forms.Timer
+$script:popTmr.Interval = 250
+$script:popTmr.Add_Tick({
+  try {
+    if (-not $script:pop.Visible) { return }
+    $cp = [System.Windows.Forms.Cursor]::Position
+    $overPop = $script:pop.Bounds.Contains($cp)
+    $overTile = $false
+    if ($script:popTile -ne $null) {
+      try {
+        $tp = $script:popTile.PointToScreen([System.Drawing.Point]::Empty)
+        $tb = New-Object System.Drawing.Rectangle($tp.X, $tp.Y, $script:popTile.Width, $script:popTile.Height)
+        if ($tb.Contains($cp)) { $overTile = $true }
+      } catch {}
+    }
+    if (-not $overPop -and -not $overTile) { $script:pop.Hide(); $script:popTile = $null }
+  } catch { Log "popTmr err: $($_.Exception.Message)" }
+})
+$script:popTmr.Start()
+
+# fit a title to the popup width with an ellipsis
+function Fit-Text($s, $max) {
+  if ($null -eq $s) { return "" }
+  if ($s.Length -le $max) { return $s }
+  if ($max -le 3) { return $s.Substring(0, $max) }
+  return ($s.Substring(0, $max - 3) + "...")
+}
+
+# show the shared popup just ABOVE $tile, listing its open windows (rebuilds rows each call)
+function Show-TilePopup($tile) {
+  try {
+    $t = $tile.Tag
+    $wins = @()
+    try { $wins = Get-AppWindows $t.Proc $t.Title } catch { Log "popup enum err: $($_.Exception.Message)"; return }
+    if ($wins.Count -lt 1) { $script:pop.Hide(); $script:popTile = $null; return }
+    $script:popTile = $tile
+    $script:pop.Controls.Clear()
+    $rowH = 34; $pad = 6
+    $script:pop.Width = 360
+    $y = $pad
+    foreach ($w in $wins) {
+      $row = New-Object System.Windows.Forms.Label
+      $row.Text = (Fit-Text $w.Title 46)
+      $row.ForeColor = [System.Drawing.Color]::White
+      $row.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+      $row.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+      $row.TextAlign = "MiddleLeft"
+      $row.SetBounds($pad, $y, (360 - $pad * 2), $rowH)
+      $row.Cursor = "Hand"
+      $row.Padding = New-Object System.Windows.Forms.Padding(8,0,8,0)
+      $row.Tag = $w.Hwnd
+      $row.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+      $row.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+      $row.Add_Click({
+        try {
+          $hwnd = $this.Tag
+          Show-Window $hwnd
+          Log "popup focus window: $($this.Text)"
+        } catch { Log "popup click err: $($_.Exception.Message)" }
+        $script:pop.Hide(); $script:popTile = $null
+      })
+      $script:pop.Controls.Add($row)
+      $y += $rowH
+    }
+    $script:pop.Height = $y + $pad
+    # position just above the tile
+    $tp = $tile.PointToScreen([System.Drawing.Point]::Empty)
+    $px = $tp.X
+    if (($px + $script:pop.Width) -gt $scr.Width) { $px = $scr.Width - $script:pop.Width }
+    if ($px -lt 0) { $px = 0 }
+    $py = $tp.Y - $script:pop.Height - 4
+    if ($py -lt 0) { $py = 0 }
+    $script:pop.Location = New-Object System.Drawing.Point($px, $py)
+    $script:pop.Show()
+    $script:pop.BringToFront()
+  } catch { Log "Show-TilePopup err: $($_.Exception.Message)" }
+}
+
+# collection of bar tiles (tile -> its badge label) for the count timer
+$script:barTiles = New-Object System.Collections.ArrayList
+
 function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titleMatch) {
   $b = New-Object System.Windows.Forms.Button
   $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
@@ -533,25 +669,21 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
   $b.Add_Click({
     $t = $this.Tag
     $btn = $this; $orig = $btn.Text
+    # count open windows: >=1 -> focus first (instant, no grey-out); 0 -> launch (grey-out)
+    $wins = @()
+    try { $wins = Get-AppWindows $t.Proc $t.Title } catch { Log "click enum err: $($_.Exception.Message)" }
+    if ($wins.Count -ge 1) {
+      try { Show-Window $wins[0].Hwnd; Log "reshown: $($t.Exe) ($text)" } catch { Log "reshow err: $($_.Exception.Message)" }
+      return
+    }
+    # no open window -> launch it, with a brief "Opening..." grey-out so people don't rapid-fire click
     $btn.Enabled = $false; $btn.Text = "Opening..."
     try {
-      # reshow, don't relaunch: if the app already has a window, bring it forward
-      $hwnd = [IntPtr]::Zero
-      try { $hwnd = Find-AppWindow $t.Proc $t.Title } catch { Log "find-window err: $($_.Exception.Message)" }
-      if ($hwnd -ne [IntPtr]::Zero) {
-        # only un-minimize if it is actually minimized - never un-maximize a fullscreen app
-        if ([WA]::IsIconic($hwnd)) { [WA]::ShowWindow($hwnd, 9) | Out-Null }  # SW_RESTORE
-        [WA]::BringWindowToTop($hwnd) | Out-Null
-        [WA]::SetForegroundWindow($hwnd) | Out-Null
-        Log "reshown: $($t.Exe) ($text)"
-      } else {
-        if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; $btn.Enabled = $true; $btn.Text = $orig; return }
-        if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
-        else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
-        Log "launched: $($t.Exe) $($t.Args)"
-      }
+      if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; $btn.Enabled = $true; $btn.Text = $orig; return }
+      if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
+      else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
+      Log "launched: $($t.Exe) $($t.Args)"
     } catch { Log "FAILED: $($t.Exe) -> $($_.Exception.Message)" }
-    # grey the button out with a brief "Opening..." so people don't rapid-fire click
     $tmr = New-Object System.Windows.Forms.Timer
     $tmr.Interval = 4000
     $tmr.Tag = @{ B = $btn; T = $orig }
@@ -561,6 +693,31 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
   $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
   $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
   return $b
+}
+
+# turn a BAR tile into a mini-taskbar tile: a top-right count badge + a hover window-list popup.
+# $tile is a Button already added to $bar; $badgeParent is $bar (the badge is a sibling drawn above the tile).
+function Register-BarTile($tile, $badgeParent) {
+  try {
+    $badge = New-Object System.Windows.Forms.Label
+    $badge.AutoSize = $false
+    $badge.Width = 22; $badge.Height = 20
+    $badge.TextAlign = "MiddleCenter"
+    $badge.BackColor = [System.Drawing.Color]::FromArgb(96,165,250)
+    $badge.ForeColor = [System.Drawing.Color]::White
+    $badge.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    # pin to the tile's TOP-RIGHT corner
+    $bx = $tile.Left + $tile.Width - $badge.Width - 2
+    $by = $tile.Top + 2
+    $badge.SetBounds($bx, $by, $badge.Width, $badge.Height)
+    $badge.Enabled = $false          # disabled label still renders but never eats tile clicks/hover
+    $badge.Visible = $false          # hidden until count > 0
+    $badgeParent.Controls.Add($badge)
+    $badge.BringToFront()
+    # hover the tile -> show the window-list popup (if any windows are open)
+    $tile.Add_MouseEnter({ try { Show-TilePopup $this } catch { Log "hover err: $($_.Exception.Message)" } }.GetNewClosure())
+    [void]$script:barTiles.Add(@{ Tile = $tile; Badge = $badge })
+  } catch { Log "Register-BarTile err: $($_.Exception.Message)" }
 }
 
 # --- language toggle: switch the foreground app's keyboard layout Hebrew <-> English ---
@@ -626,9 +783,16 @@ $bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
 $bar.StartPosition = "Manual"
 $bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
 $bar.BackColor = $colTile
-$bar.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null))
-$bar.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice" $null))
-$bar.Controls.Add((New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"))
+$tileOtzar = New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null
+$tileLibre = New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice" $null
+$tilePdf   = New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"
+$bar.Controls.Add($tileOtzar)
+$bar.Controls.Add($tileLibre)
+$bar.Controls.Add($tilePdf)
+# make the bar tiles into mini-taskbar tiles: count badge + hover window-list popup
+Register-BarTile $tileOtzar $bar
+Register-BarTile $tileLibre $bar
+Register-BarTile $tilePdf   $bar
 # language toggle button (left of the credit label)
 $btnLang = New-Object System.Windows.Forms.Button
 $btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 490), 12, 90, 48)
@@ -654,6 +818,29 @@ $langTmr = New-Object System.Windows.Forms.Timer
 $langTmr.Interval = 1000
 $langTmr.Add_Tick({ try { $btnLang.Text = Get-ForeLang } catch {} })
 $langTmr.Start()
+# ~1s timer to recompute each bar tile's open-window count and update its badge (hide at 0)
+$badgeTmr = New-Object System.Windows.Forms.Timer
+$badgeTmr.Interval = 1000
+$badgeTmr.Add_Tick({
+  try {
+    foreach ($e in $script:barTiles) {
+      try {
+        $t = $e.Tile.Tag
+        $n = 0
+        $wins = Get-AppWindows $t.Proc $t.Title
+        $n = @($wins).Count
+        if ($n -gt 0) {
+          $e.Badge.Text = "$n"
+          if (-not $e.Badge.Visible) { $e.Badge.Visible = $true }
+          $e.Badge.BringToFront()
+        } else {
+          if ($e.Badge.Visible) { $e.Badge.Visible = $false }
+        }
+      } catch { Log "badge tile err: $($_.Exception.Message)" }
+    }
+  } catch { Log "badgeTmr err: $($_.Exception.Message)" }
+})
+$badgeTmr.Start()
 $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
