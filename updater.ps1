@@ -26,20 +26,28 @@ function Invoke-OtzarSelfUpdate {
 
     $dir = Split-Path -Parent $ScriptPath
 
-    # local version (missing/older copies -> 0.0.0 so they update)
+    # version lives in setup.ps1 as  $KioskVersion = 'x.y.z'  (single source of truth; no separate VERSION file)
+    $verRegex = '\$KioskVersion\s*=\s*[''"]([0-9]+\.[0-9]+\.[0-9]+)[''"]'
+
+    # local version: parse it out of the local setup.ps1 (missing/unparseable -> 0.0.0 so the copy updates)
     $current = [version]'0.0.0'
-    $localVersionFile = Join-Path $dir 'VERSION'
-    if (Test-Path -LiteralPath $localVersionFile) {
-        try { $current = [version]((Get-Content -LiteralPath $localVersionFile -Raw).Trim()) } catch {}
+    $localSetup = Join-Path $dir 'setup.ps1'
+    if (Test-Path -LiteralPath $localSetup) {
+        try {
+            $lm = [regex]::Match((Get-Content -LiteralPath $localSetup -Raw), $verRegex)
+            if ($lm.Success) { $current = [version]$lm.Groups[1].Value }
+        } catch {}
     }
 
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-    # latest version on GitHub (cache-busted so we don't get a stale raw CDN copy)
-    $rawUrl = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch/VERSION?nocache=$([guid]::NewGuid())"
+    # latest version on GitHub: parse $KioskVersion out of the remote setup.ps1 (cache-busted vs a stale raw CDN copy)
+    $rawUrl = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch/setup.ps1?nocache=$([guid]::NewGuid())"
     try {
-        $remoteText = (Invoke-WebRequest -Uri $rawUrl -UseBasicParsing -TimeoutSec 15 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
-        $remote = [version]($remoteText.Trim())
+        $remoteText = (Invoke-WebRequest -Uri $rawUrl -UseBasicParsing -TimeoutSec 20 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
+        $rm = [regex]::Match($remoteText, $verRegex)
+        if (-not $rm.Success) { throw "could not find `$KioskVersion in remote setup.ps1" }
+        $remote = [version]$rm.Groups[1].Value
     } catch {
         Write-Host "Update check skipped (couldn't reach GitHub): $($_.Exception.Message)" -ForegroundColor DarkYellow
         return
