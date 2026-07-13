@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.2.2'   # single source of truth for the self-updater (replaces the old VERSION file)
+$KioskVersion = '1.2.3'   # single source of truth for the self-updater (replaces the old VERSION file)
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -469,6 +469,8 @@ public class WA {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
@@ -537,7 +539,9 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
       $hwnd = [IntPtr]::Zero
       try { $hwnd = Find-AppWindow $t.Proc $t.Title } catch { Log "find-window err: $($_.Exception.Message)" }
       if ($hwnd -ne [IntPtr]::Zero) {
-        [WA]::ShowWindow($hwnd, 9) | Out-Null   # SW_RESTORE
+        # only un-minimize if it is actually minimized - never un-maximize a fullscreen app
+        if ([WA]::IsIconic($hwnd)) { [WA]::ShowWindow($hwnd, 9) | Out-Null }  # SW_RESTORE
+        [WA]::BringWindowToTop($hwnd) | Out-Null
         [WA]::SetForegroundWindow($hwnd) | Out-Null
         Log "reshown: $($t.Exe) ($text)"
       } else {
@@ -745,7 +749,7 @@ $form.Controls.Add($top)
 $lblTitle = New-Object System.Windows.Forms.Label
 $lblTitle.Text = "PDF Files"
 $lblTitle.ForeColor = $colWhite
-$lblTitle.Font = New-Object System.Drawing.Font($fontName + " Semibold", 20)
+$lblTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 20)
 $lblTitle.TextAlign = "MiddleLeft"
 $lblTitle.SetBounds(24, 10, 400, 40)
 $top.Controls.Add($lblTitle)
@@ -775,7 +779,7 @@ $btnClose.FlatStyle = "Flat"
 $btnClose.FlatAppearance.BorderSize = 0
 $btnClose.ForeColor = $colWhite
 $btnClose.BackColor = [System.Drawing.Color]::FromArgb(190,60,60)
-$btnClose.Font = New-Object System.Drawing.Font($fontName + " Semibold", 14)
+$btnClose.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 14)
 $btnClose.Cursor = "Hand"
 $btnClose.Anchor = "Top,Right"
 $btnClose.SetBounds(($form.ClientSize.Width - 180), 30, 150, 52)
@@ -804,7 +808,7 @@ function New-Card($kind, $name, $path) {
   $card.ForeColor = $colWhite
   $card.Cursor = "Hand"
   $card.TextAlign = "MiddleCenter"
-  $card.Font = New-Object System.Drawing.Font($fontName + " Semibold", 12)
+  $card.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
   if ($kind -eq "dir") { $tag = "FOLDER"; $accent = $colFolder } else { $tag = "PDF"; $accent = $colPdf }
   $card.Text = $name
   $card.Tag = @{ Type = $kind; Path = $path }
@@ -814,7 +818,7 @@ function New-Card($kind, $name, $path) {
   $lbl.Text = $tag
   $lbl.ForeColor = $accent
   $lbl.BackColor = [System.Drawing.Color]::Transparent
-  $lbl.Font = New-Object System.Drawing.Font($fontName + " Semibold", 10)
+  $lbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
   $lbl.TextAlign = "MiddleCenter"
   $lbl.SetBounds(0, 8, 200, 22)
   $lbl.Cursor = "Hand"
