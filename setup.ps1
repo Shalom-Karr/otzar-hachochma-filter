@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.0'   # single source of truth for the self-updater (replaces the old VERSION file)
+$KioskVersion = '1.3.1'   # single source of truth for the self-updater (replaces the old VERSION file)
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -728,28 +728,31 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
   return $b
 }
 
-# turn a BAR tile into a mini-taskbar tile: a top-right count badge + a hover window-list popup.
-# $tile is a Button already added to $bar; $badgeParent is $bar (the badge is a sibling drawn above the tile).
+# turn a BAR tile into a mini-taskbar tile: a small "^" button on the tile's right edge that shows
+# the open-window count and, when CLICKED, pops up the list of that app's windows.
+# A child Button renders reliably over a parent Button (a sibling Label did not), and an explicit
+# click is more reliable than hover.
 function Register-BarTile($tile, $badgeParent) {
   try {
-    $badge = New-Object System.Windows.Forms.Label
-    $badge.AutoSize = $false
-    $badge.Width = 22; $badge.Height = 20
-    $badge.TextAlign = "MiddleCenter"
-    $badge.BackColor = [System.Drawing.Color]::FromArgb(96,165,250)
-    $badge.ForeColor = [System.Drawing.Color]::White
-    $badge.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    # pin to the tile's TOP-RIGHT corner
-    $bx = $tile.Left + $tile.Width - $badge.Width - 2
-    $by = $tile.Top + 2
-    $badge.SetBounds($bx, $by, $badge.Width, $badge.Height)
-    $badge.Enabled = $false          # disabled label still renders but never eats tile clicks/hover
-    $badge.Visible = $false          # hidden until count > 0
-    $badgeParent.Controls.Add($badge)
-    $badge.BringToFront()
-    # hover the tile -> show the window-list popup (if any windows are open)
-    $tile.Add_MouseEnter({ try { Show-TilePopup $this } catch { Log "hover err: $($_.Exception.Message)" } }.GetNewClosure())
-    [void]$script:barTiles.Add(@{ Tile = $tile; Badge = $badge })
+    $arrow = New-Object System.Windows.Forms.Button
+    $arrow.Text = "^"
+    $arrow.FlatStyle = "Flat"; $arrow.FlatAppearance.BorderSize = 0
+    $arrow.ForeColor = [System.Drawing.Color]::White
+    $arrow.BackColor = [System.Drawing.Color]::FromArgb(51,65,85)
+    $arrow.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $arrow.Cursor = "Hand"
+    $arrow.TabStop = $false
+    $aw = 40
+    $arrow.SetBounds(($tile.Width - $aw - 3), 5, $aw, ($tile.Height - 10))
+    $arrow.Anchor = "Top,Right"
+    $tile.Controls.Add($arrow)
+    $arrow.BringToFront()
+    $arrow.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(71,85,105) })
+    $arrow.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+    # click the arrow -> show the window-list popup. Capture THIS tile explicitly.
+    $capTile = $tile
+    $arrow.Add_Click({ try { Show-TilePopup $capTile } catch { Log "arrow err: $($_.Exception.Message)" } }.GetNewClosure())
+    [void]$script:barTiles.Add(@{ Tile = $tile; Arrow = $arrow; LastN = -1 })
   } catch { Log "Register-BarTile err: $($_.Exception.Message)" }
 }
 
@@ -862,12 +865,12 @@ $badgeTmr.Add_Tick({
         $n = 0
         $wins = Get-AppWindows $t.Proc $t.Title
         $n = @($wins).Count
-        if ($n -gt 0) {
-          $e.Badge.Text = "$n"
-          if (-not $e.Badge.Visible) { $e.Badge.Visible = $true }
-          $e.Badge.BringToFront()
-        } else {
-          if ($e.Badge.Visible) { $e.Badge.Visible = $false }
+        if ($n -ne $e.LastN) {
+          Log ("windows [" + $t.Proc + " / " + $t.Title + "] = " + $n)
+          $e.LastN = $n
+          # show the count on the arrow button (e.g. "2 ^"), or just "^" when nothing is open
+          if ($n -gt 0) { $e.Arrow.Text = "$n ^" } else { $e.Arrow.Text = "^" }
+          $e.Arrow.BringToFront()
         }
       } catch { Log "badge tile err: $($_.Exception.Message)" }
     }
