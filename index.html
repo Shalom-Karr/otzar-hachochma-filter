@@ -29,6 +29,9 @@
   pre code { border: 0; background: none; padding: 0; color: #e2e8f0; }
   a { color: #60a5fa; text-decoration: none; } a:hover { text-decoration: underline; }
   footer { color: #64748b; text-align: center; margin-top: 40px; font-size: .95rem; }
+  .dlrow { display:flex; gap:12px; flex-wrap:wrap; margin-top:16px; }
+  .dl { display:inline-block; background:#2563eb; color:#fff; padding:11px 20px; border-radius:8px; font-weight:600; text-decoration:none; }
+  .dl:hover { background:#1d4ed8; text-decoration:none; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 1.9rem; } }
 </style>
@@ -68,9 +71,14 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 .\setup.ps1      # apply the lockdown + launcher</code></pre>
       <p style="margin-top:14px">Both scripts self-update by checking the tiny <a href="version">version</a> endpoint on startup.
       Full source on <a href="https://github.com/Shalom-Karr/otzar-hachochma-filter">GitHub</a>.</p>
+      <div class="dlrow">
+        <a class="dl" href="setup.ps1" download>Download setup.ps1</a>
+        <a class="dl" href="create.ps1" download>Download create.ps1</a>
+      </div>
     </div>
 
-    <footer>Built by Shalom Karr &middot; (216) 451-6698</footer>
+    <footer>Built by Shalom Karr &middot; (216) 451-6698<br>
+    <a href="errors.html">Log board</a> &middot; <a href="https://tinyurl.com/skotzarfilter">tinyurl.com/skotzarfilter</a></footer>
   </div>
 
 <script>
