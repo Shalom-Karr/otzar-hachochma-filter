@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Otzar Hachochma Filter</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0; line-height: 1.6;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+  }
+  .wrap { max-width: 820px; width: 100%; padding: 48px 24px 80px; }
+  header { text-align: center; margin-bottom: 40px; }
+  h1 { font-size: 2.4rem; font-weight: 600; color: #fff; letter-spacing: -0.5px; }
+  .tag { color: #94a3b8; margin-top: 8px; font-size: 1.05rem; }
+  .badge {
+    display: inline-block; margin-top: 18px; padding: 6px 16px; border-radius: 999px;
+    background: #1e293b; color: #60a5fa; font-weight: 600; font-size: .95rem;
+    border: 1px solid #334155;
+  }
+  .card {
+    background: #1e293b; border: 1px solid #334155; border-radius: 14px;
+    padding: 24px 28px; margin: 18px 0;
+  }
+  .card h2 { font-size: 1.15rem; color: #fff; margin-bottom: 12px; font-weight: 600; }
+  .card p, .card li { color: #cbd5e1; }
+  ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  code {
+    background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+    padding: 2px 7px; font-family: Consolas, monospace; color: #93c5fd; font-size: .92em;
+  }
+  pre {
+    background: #0f172a; border: 1px solid #334155; border-radius: 10px;
+    padding: 16px; overflow-x: auto; margin-top: 10px;
+  }
+  pre code { border: 0; background: none; padding: 0; color: #e2e8f0; }
+  a { color: #60a5fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  footer { color: #64748b; text-align: center; margin-top: 40px; font-size: .95rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 1.9rem; } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Otzar Hachochma Filter</h1>
+      <p class="tag">Turns a Windows 11 Pro PC into a locked-down Otzar Hachochma kiosk.</p>
+      <span class="badge" id="ver">version &hellip;</span>
+    </header>
+
+    <div class="card">
+      <h2>What it does</h2>
+      <p>Creates a passwordless standard account that can run <strong>only</strong> Otzar Hachochma
+      (plus LibreOffice and a read-only PDF browser), blocks everything else, replaces the desktop
+      with a custom launcher, and keeps AnyDesk remote support working. Your admin account is untouched.</p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Locks down</h2>
+        <ul>
+          <li>All other apps &amp; browsing</li>
+          <li>USB storage &amp; phones (MTP)</li>
+          <li>Bluetooth, Task Manager, Run</li>
+          <li>Store / media / games apps</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h2>Keeps working</h2>
+        <ul>
+          <li>Otzar Hachochma (auto-launch)</li>
+          <li>LibreOffice + PDF viewing</li>
+          <li>Printing (print-only)</li>
+          <li>AnyDesk incoming support</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Install</h2>
+      <p>On the administrator account, in an elevated PowerShell:</p>
+      <pre><code>cd "$env:USERPROFILE\Downloads\Otzar Hachochma Filter"
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\create.ps1     # make the account, then log in once with 1234 and sign out
+.\setup.ps1      # apply the lockdown + launcher</code></pre>
+      <p style="margin-top:14px">Both scripts self-update from
+      <a href="version.xml">version.xml</a> on startup. Full source on
+      <a href="https://github.com/Shalom-Karr/otzar-hachochma-filter">GitHub</a>.</p>
+    </div>
+
+    <footer>Built by Shalom Karr &middot; (216) 451-6698</footer>
+  </div>
+
+<script>
+  // show the current published version from the same endpoint the updater uses
+  fetch('version.xml?nocache=' + Date.now()).then(r => r.text()).then(t => {
+    var m = t.match(/<version>\s*([0-9.]+)\s*<\/version>/);
+    if (m) document.getElementById('ver').textContent = 'version ' + m[1];
+  }).catch(function(){});
+</script>
+</body>
+</html>
