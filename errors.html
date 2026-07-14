@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Otzar Kiosk - Log Board</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; background:#0f172a; color:#e2e8f0; line-height:1.5; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 18px 80px; }
+  h1 { font-size: 1.6rem; color:#fff; font-weight:600; }
+  .sub { color:#94a3b8; margin-top:6px; font-size:.95rem; }
+  .note { color:#facc15; font-size:.85rem; margin-top:8px; }
+  .composer { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:16px; margin:20px 0; }
+  input[type=text], textarea {
+    width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px;
+    padding:10px 12px; font-family:inherit; font-size:.95rem;
+  }
+  textarea { min-height:130px; font-family:Consolas,monospace; font-size:.88rem; resize:vertical; margin-top:10px; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+  button {
+    background:#2563eb; color:#fff; border:0; border-radius:8px; padding:10px 20px;
+    font-family:inherit; font-size:.95rem; font-weight:600; cursor:pointer;
+  }
+  button:hover { background:#1d4ed8; }
+  button.ghost { background:#334155; } button.ghost:hover { background:#475569; }
+  input[type=file] { color:#94a3b8; font-size:.85rem; max-width:100%; }
+  .cnt { color:#64748b; font-size:.8rem; margin-left:auto; }
+  .msg { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:14px 16px; margin:12px 0; }
+  .msg .meta { display:flex; align-items:center; gap:10px; margin-bottom:8px; font-size:.82rem; color:#94a3b8; flex-wrap:wrap; }
+  .msg .who { color:#60a5fa; font-weight:600; }
+  .msg pre { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:Consolas,monospace; font-size:.84rem; color:#e2e8f0; max-height:440px; }
+  .att { margin-bottom:8px; }
+  .dl2 { display:inline-block; background:#166534; color:#fff; padding:7px 14px; border-radius:7px; font-size:.85rem; font-weight:600; text-decoration:none; }
+  .dl2:hover { background:#15803d; }
+  .x { margin-left:auto; background:#7f1d1d; padding:6px 12px; font-size:.82rem; }
+  .x:hover { background:#b91c1c; }
+  .empty { color:#64748b; text-align:center; padding:40px 0; }
+  a { color:#60a5fa; } .top { display:flex; justify-content:space-between; align-items:baseline; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Log Board</h1>
+        <p class="sub">Paste a log or upload a file on one device, read/delete it on another. No login. Anyone can post or delete.</p>
+      </div>
+      <a href="index.html">&larr; home</a>
+    </div>
+    <p class="note">Public board, no security. Text posts last ~12h; files/long logs (auto-uploaded, up to 2&nbsp;MB) last ~3h.</p>
+
+    <div class="composer">
+      <input id="who" type="text" placeholder="From (optional) - e.g. KHAL-OTZAR kiosk" maxlength="60">
+      <textarea id="body" placeholder="Paste the log here. If it is long it uploads automatically as a file..."></textarea>
+      <div class="row">
+        <button onclick="post()">Post</button>
+        <input id="file" type="file">
+        <button class="ghost" onclick="load()">Refresh</button>
+        <span class="cnt" id="cnt">0 chars</span>
+      </div>
+    </div>
+
+    <div id="list"><p class="empty">Loading&hellip;</p></div>
+  </div>
+
+<script>
+  // Public ntfy.sh topic - no auth, CORS-enabled. Change TOPIC to reset the board.
+  var TOPIC = "otzar_kiosk_sk_logboard_9f3x2";
+  var BASE  = "https://ntfy.sh/" + TOPIC;
+  var MSG_MAX = 3900;               // ntfy text-message limit is ~4KB; above this we send as a file
+
+  var bodyEl = document.getElementById('body');
+  var fileEl = document.getElementById('file');
+  var cntEl  = document.getElementById('cnt');
+  bodyEl.addEventListener('input', function(){
+    var n = bodyEl.value.length;
+    cntEl.textContent = n + (n > MSG_MAX ? ' chars (uploads as file)' : ' chars');
+  });
+
+  function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fmtSize(b){ b=+b||0; return b<1024 ? b+' B' : b<1048576 ? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(2)+' MB'; }
+
+  async function post(){
+    var who = document.getElementById('who').value.trim();
+    var headers = {};
+    if (who) headers['Title'] = who.replace(/[\r\n]/g,' ').slice(0,60);
+    var file = fileEl.files[0];
+    var text = bodyEl.value;
+    try {
+      if (file) {
+        if (file.size > 2*1024*1024) { alert('File too big (max 2 MB).'); return; }
+        headers['Filename'] = file.name.replace(/[\r\n]/g,'_').slice(0,80);
+        await fetch(BASE, { method:'PUT', body:file, headers:headers });
+      } else if (text.trim()) {
+        if (text.length > MSG_MAX) {
+          headers['Filename'] = 'log-' + Date.now() + '.txt';
+          await fetch(BASE, { method:'PUT', body:text, headers:headers });
+        } else {
+          await fetch(BASE, { method:'POST', body:text, headers:headers });
+        }
+      } else { return; }
+      bodyEl.value=''; fileEl.value=''; cntEl.textContent='0 chars';
+      setTimeout(load, 800);
+    } catch(e){ alert('Post failed: '+e); }
+  }
+
+  async function del(id){
+    try { await fetch(BASE, { method:'POST', body:'##DELETE##'+id }); setTimeout(load, 400); }
+    catch(e){ alert('Delete failed: '+e); }
+  }
+
+  async function load(){
+    var listEl = document.getElementById('list');
+    try {
+      var res = await fetch(BASE + '/json?poll=1&since=all&_=' + Date.now());
+      var text = await res.text();
+      var lines = text.trim().split('\n').filter(Boolean);
+      var msgs = [], deleted = {};
+      for (var i=0;i<lines.length;i++){
+        var m; try { m = JSON.parse(lines[i]); } catch(e){ continue; }
+        if (m.event !== 'message') continue;
+        if (m.message && m.message.indexOf('##DELETE##') === 0) { deleted[m.message.slice(10)] = 1; continue; }
+        msgs.push(m);
+      }
+      var visible = msgs.filter(function(m){ return !deleted[m.id]; }).reverse();
+      if (!visible.length) { listEl.innerHTML = '<p class="empty">No logs posted yet.</p>'; return; }
+      var html = '', pending = [];
+      for (var j=0;j<visible.length;j++){
+        var m = visible[j];
+        var when = new Date(m.time*1000).toLocaleString();
+        var who = '<span class="who">' + esc(m.title || 'anonymous') + '</span>';
+        html += '<div class="msg"><div class="meta">'+who+'<span>'+when+'</span>'+
+                '<button class="x" onclick="del(\''+m.id+'\')">Delete</button></div>';
+        if (m.attachment && m.attachment.url) {
+          var a = m.attachment;
+          html += '<div class="att"><a class="dl2" href="'+esc(a.url)+'" download="'+esc(a.name)+'">Download '+esc(a.name)+' ('+fmtSize(a.size)+')</a></div>';
+          if (/text|json|xml|log|plain/i.test(a.type||'') && (+a.size) < 300000) {
+            html += '<pre id="att_'+m.id+'">loading file&hellip;</pre>';
+            pending.push({ id:m.id, url:a.url });
+          }
+        } else {
+          html += '<pre>'+esc(m.message)+'</pre>';
+        }
+        html += '</div>';
+      }
+      listEl.innerHTML = html;
+      pending.forEach(function(p){
+        fetch(p.url).then(function(r){ return r.text(); }).then(function(t){
+          var el = document.getElementById('att_'+p.id); if (el) el.textContent = t;
+        }).catch(function(){
+          var el = document.getElementById('att_'+p.id); if (el) el.textContent = '(could not load inline - use Download)';
+        });
+      });
+    } catch(e){ listEl.innerHTML = '<p class="empty">Could not load (offline?). '+esc(''+e)+'</p>'; }
+  }
+
+  load();
+  setInterval(load, 5000);
+</script>
+</body>
+</html>

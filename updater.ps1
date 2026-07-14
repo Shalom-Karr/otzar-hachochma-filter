@@ -42,45 +42,58 @@ function Invoke-OtzarSelfUpdate {
 
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-    Write-Host "[updater] local version: v$current" -ForegroundColor DarkGray
+    # log to the same public setup.log the admin reads, plus the console
+    $LogFile = "C:\Users\Public\Documents\OtzarKiosk\setup.log"
+    function Ulog($m) {
+        Write-Host "[updater] $m" -ForegroundColor DarkGray
+        try {
+            $ld = Split-Path $LogFile -Parent
+            if (-not (Test-Path $ld)) { New-Item -ItemType Directory -Path $ld -Force | Out-Null }
+            Add-Content -LiteralPath $LogFile -Value ("{0}  [updater] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m)
+        } catch {}
+    }
+    $checkBudget = 45   # seconds: give up the update CHECK after this and install the current copy AS-IS
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    Ulog "installed version: v$current"
 
     # latest version: read the tiny /version endpoint on GitHub Pages (a few bytes of plain text).
-    # Falls back to parsing the remote setup.ps1 if Pages can't be reached (offline-safe either way).
+    # The whole CHECK is capped at ${checkBudget}s; if it can't finish we install the current copy as-is.
     $pagesSite = "https://$($OtzarRepoOwner.ToLower()).github.io/$OtzarRepoName"
     $remote    = $null
     $verUrl    = "$pagesSite/version?nocache=$([guid]::NewGuid())"
     try {
-        Write-Host "[updater] checking version endpoint: $verUrl" -ForegroundColor DarkGray
-        $txt = (Invoke-WebRequest -Uri $verUrl -UseBasicParsing -TimeoutSec 20 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
+        $t1 = [int][math]::Max(5, $checkBudget - $sw.Elapsed.TotalSeconds)
+        Ulog "checking online version at /version (timeout ${t1}s)"
+        $txt = (Invoke-WebRequest -Uri $verUrl -UseBasicParsing -TimeoutSec $t1 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
         $vm = [regex]::Match([string]$txt, '([0-9]+\.[0-9]+\.[0-9]+)')
-        if ($vm.Success) { $remote = [version]$vm.Groups[1].Value; Write-Host "[updater] /version reports v$remote" -ForegroundColor DarkGray }
-        else { Write-Host "[updater] /version had no version number; falling back to setup.ps1." -ForegroundColor DarkYellow }
-    } catch {
-        Write-Host "[updater] /version unreachable ($($_.Exception.Message)); falling back to setup.ps1." -ForegroundColor DarkYellow
+        if ($vm.Success) { $remote = [version]$vm.Groups[1].Value }
+    } catch { Ulog "/version check failed: $($_.Exception.Message)" }
+
+    if (($null -eq $remote) -and ($sw.Elapsed.TotalSeconds -lt $checkBudget)) {
+        # fallback: parse $KioskVersion out of the remote setup.ps1
+        $rawUrl = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch/setup.ps1?nocache=$([guid]::NewGuid())"
+        try {
+            $t2 = [int][math]::Max(5, $checkBudget - $sw.Elapsed.TotalSeconds)
+            Ulog "falling back to raw setup.ps1 (timeout ${t2}s)"
+            $remoteText = (Invoke-WebRequest -Uri $rawUrl -UseBasicParsing -TimeoutSec $t2 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
+            $rm = [regex]::Match($remoteText, $verRegex)
+            if ($rm.Success) { $remote = [version]$rm.Groups[1].Value }
+        } catch { Ulog "setup.ps1 fallback failed: $($_.Exception.Message)" }
     }
 
     if ($null -eq $remote) {
-        # fallback: parse $KioskVersion out of the remote setup.ps1 (cache-busted vs a stale raw CDN copy)
-        $rawUrl = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch/setup.ps1?nocache=$([guid]::NewGuid())"
-        try {
-            Write-Host "[updater] checking fallback: $rawUrl" -ForegroundColor DarkGray
-            $remoteText = (Invoke-WebRequest -Uri $rawUrl -UseBasicParsing -TimeoutSec 20 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
-            $rm = [regex]::Match($remoteText, $verRegex)
-            if (-not $rm.Success) { throw "could not find `$KioskVersion in remote setup.ps1" }
-            $remote = [version]$rm.Groups[1].Value
-            Write-Host "[updater] setup.ps1 reports v$remote" -ForegroundColor DarkGray
-        } catch {
-            Write-Host "Update check skipped (couldn't reach GitHub): $($_.Exception.Message)" -ForegroundColor DarkYellow
-            return
-        }
-    }
-
-    if ($remote -le $current) {
-        Write-Host "Otzar kiosk scripts are up to date (v$current)." -ForegroundColor DarkGray
+        Ulog "could not determine the online version within ${checkBudget}s (elapsed $([int]$sw.Elapsed.TotalSeconds)s) - installing the current copy v$current AS-IS."
         return
     }
 
-    Write-Host "A newer version is on GitHub: v$remote (you have v$current). Updating..." -ForegroundColor Cyan
+    Ulog "online (available) version: v$remote"
+
+    if ($remote -le $current) {
+        Ulog "up to date (installed v$current, online v$remote) - no update needed."
+        return
+    }
+
+    Ulog "newer version available: v$remote (installed v$current) - updating..."
 
     $tmpDir = Join-Path $env:TEMP ("otzar-update-" + [guid]::NewGuid().ToString('N'))
     $tmpZip = "$tmpDir.zip"
@@ -92,13 +105,13 @@ function Invoke-OtzarSelfUpdate {
     $viaPages = $true
     try {
         foreach ($f in $files) {
-            Write-Host "[updater] downloading $f from Pages..." -ForegroundColor DarkGray
+            Ulog "downloading $f from Pages..."
             Invoke-WebRequest -Uri "$pagesSite/$f?nocache=$([guid]::NewGuid())" `
                 -OutFile (Join-Path $tmpDir $f) -UseBasicParsing -TimeoutSec 60 -Headers @{ 'Cache-Control' = 'no-cache' }
         }
     } catch {
         $viaPages = $false
-        Write-Host "[updater] Pages download failed ($($_.Exception.Message)); falling back to the github.com zip." -ForegroundColor DarkYellow
+        Ulog "Pages download failed ($($_.Exception.Message)); falling back to the github.com zip."
     }
 
     try {
@@ -113,13 +126,13 @@ function Invoke-OtzarSelfUpdate {
             Copy-Item -Path (Join-Path $inner.FullName '*') -Destination $dir -Recurse -Force
         }
     } catch {
-        Write-Host "Auto-update failed ($($_.Exception.Message)); continuing on the current version v$current." -ForegroundColor Yellow
+        Ulog "auto-update failed ($($_.Exception.Message)); continuing on the current version v$current."
         Remove-Item -LiteralPath $tmpZip, $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
     Remove-Item -LiteralPath $tmpZip, $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-    Write-Host "Updated to v$remote. Re-running the new version..." -ForegroundColor Green
+    Ulog "updated to v$remote. Re-running the new version..."
 
     # re-run the freshly downloaded script in this same elevated session, preserving the
     # caller's args and forcing -NoUpdate so it can't update-loop.
