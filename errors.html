@@ -49,7 +49,7 @@
       </div>
       <a href="index.html">&larr; home</a>
     </div>
-    <p class="note">Public board, no security. Text posts last ~12h; files/long logs (auto-uploaded, up to 2&nbsp;MB) last ~3h.</p>
+    <p class="note">Public board, no security. Text posts last ~12h; files/long logs (auto-uploaded, up to 2&nbsp;MB) last ~3h. No auto-refresh - click <b>Refresh</b> to load new posts (avoids rate limits).</p>
 
     <div class="composer">
       <input id="who" type="text" placeholder="From (optional) - e.g. KHAL-OTZAR kiosk" maxlength="60">
@@ -156,8 +156,7 @@
     } catch(e){ listEl.innerHTML = '<p class="empty">Could not load (offline?). '+esc(''+e)+'</p>'; }
   }
 
-  load();
-  setInterval(load, 5000);
+  load();  // one load on open. NO auto-refresh - ntfy.sh rate-limits (429) frequent polls. Use the Refresh button.
 </script>
 </body>
 </html>

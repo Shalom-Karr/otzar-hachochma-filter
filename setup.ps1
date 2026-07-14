@@ -47,18 +47,11 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.6'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.7'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run from an ELEVATED PowerShell (Run as Administrator)."
-}
-
-# ---- self-update from GitHub (offline-safe; re-runs the new version if one exists) ----
-# Skipped for -ListOnly (preview makes no changes) and -Undo (teardown).
-if ((-not $NoUpdate) -and (-not $ListOnly) -and (-not $Undo)) {
-    $upd = Join-Path $PSScriptRoot 'updater.ps1'
-    if (Test-Path -LiteralPath $upd) { . $upd; Invoke-OtzarSelfUpdate -ScriptPath $PSCommandPath -BoundParams $PSBoundParameters }
 }
 
 # ---- setup progress log: prints to console AND appends to a file the admin can read later ----
@@ -68,8 +61,24 @@ function Slog([string]$m, [string]$color = "Gray") {
     try { Write-Host $m -ForegroundColor $color } catch { Write-Host $m }
     try { Add-Content -LiteralPath "$PubLog\setup.log" -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {}
 }
-Slog "===== setup.ps1 starting: user='$OtzarUser' ListOnly=$ListOnly Undo=$Undo InstallApps=$InstallApps =====" "Cyan"
+Slog "===== setup.ps1 v$KioskVersion starting: user='$OtzarUser' ListOnly=$ListOnly Undo=$Undo InstallApps=$InstallApps =====" "Cyan"
 Slog "GitHub Pages: https://shalom-karr.github.io/otzar-hachochma-filter  (version + scripts + /errors log board)" "DarkGray"
+
+# ---- self-update (offline-safe; re-runs the new version if one exists). Skipped for -ListOnly / -Undo. ----
+if ((-not $NoUpdate) -and (-not $ListOnly) -and (-not $Undo)) {
+    $upd = Join-Path $PSScriptRoot 'updater.ps1'
+    if (-not (Test-Path -LiteralPath $upd)) {
+        # a lone setup.ps1 (downloaded by itself) has no updater.ps1 - fetch it from Pages so the
+        # version check + self-update still work instead of silently skipping.
+        try {
+            Slog "updater.ps1 not found next to setup.ps1 - downloading it from Pages..." "DarkYellow"
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://shalom-karr.github.io/otzar-hachochma-filter/updater.ps1?nocache=$([guid]::NewGuid())" -OutFile $upd -UseBasicParsing -TimeoutSec 30 -Headers @{ 'Cache-Control' = 'no-cache' }
+        } catch { Slog "could not download updater.ps1 ($($_.Exception.Message)) - skipping online version check; running v$KioskVersion as-is." "DarkYellow" }
+    }
+    if (Test-Path -LiteralPath $upd) { . $upd; Invoke-OtzarSelfUpdate -ScriptPath $PSCommandPath -BoundParams $PSBoundParameters }
+    else { Slog "no updater.ps1 available - installed version is v$KioskVersion (online check skipped)." "DarkYellow" }
+}
 
 # ---- the account must already exist (run create.ps1 first, then log into it once) ----
 if ((-not $Undo) -and (-not (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue))) {
@@ -529,7 +538,7 @@ function Find-AppWindow($procRe, $titleMatch) {
 # returns an array of @{ Hwnd = <IntPtr>; Title = <string> } for every visible top-level
 # window (non-empty title) whose owning process name matches $procRe OR whose title -eq $titleMatch.
 function Get-AppWindows($procRe, $titleMatch) {
-  $script:winList = New-Object System.Collections.ArrayList
+  $appWinList = New-Object System.Collections.ArrayList
   $cb2 = [WA+EnumProc]{
     param($h, $l)
     if (-not [WA]::IsWindowVisible($h)) { return $true }
@@ -554,11 +563,11 @@ function Get-AppWindows($procRe, $titleMatch) {
         } catch {}
       }
     }
-    if ($match) { [void]$script:winList.Add(@{ Hwnd = $h; Title = $wt }) }
+    if ($match) { [void]$appWinList.Add(@{ Hwnd = $h; Title = $wt }) }
     return $true
   }.GetNewClosure()
   try { [WA]::EnumWindows($cb2, [IntPtr]::Zero) | Out-Null } catch {}
-  return @($script:winList.ToArray())
+  return @($appWinList.ToArray())
 }
 
 # --- diagnostic: log every visible titled window's process name + title (to fix matchers) ---
