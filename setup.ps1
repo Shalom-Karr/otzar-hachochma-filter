@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.1'   # single source of truth for the self-updater (replaces the old VERSION file)
+$KioskVersion = '1.3.2'   # single source of truth for the self-updater (replaces the old VERSION file)
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -539,18 +539,46 @@ function Get-AppWindows($procRe, $titleMatch) {
     $match = $false
     if ($titleMatch -and ($wt -eq $titleMatch)) { $match = $true }
     if ((-not $match) -and $procRe) {
-      $pid3 = 0
-      [WA]::GetWindowThreadProcessId($h, [ref]$pid3) | Out-Null
-      try {
-        $pr = Get-Process -Id $pid3 -ErrorAction Stop
-        if ($pr.ProcessName -match $procRe) { $match = $true }
-      } catch {}
+      # match the pattern against the window TITLE first (catches apps whose process name is
+      # not "otzar" - e.g. a Hebrew-named or Electron exe), then fall back to the process name
+      if ($wt -match $procRe) { $match = $true }
+      else {
+        $pid3 = 0
+        [WA]::GetWindowThreadProcessId($h, [ref]$pid3) | Out-Null
+        try {
+          $pr = Get-Process -Id $pid3 -ErrorAction Stop
+          if ($pr.ProcessName -match $procRe) { $match = $true }
+        } catch {}
+      }
     }
     if ($match) { [void]$script:winList.Add(@{ Hwnd = $h; Title = $wt }) }
     return $true
   }.GetNewClosure()
   try { [WA]::EnumWindows($cb2, [IntPtr]::Zero) | Out-Null } catch {}
   return @($script:winList.ToArray())
+}
+
+# --- diagnostic: log every visible titled window's process name + title (to fix matchers) ---
+function Dump-AllWindows {
+  try {
+    $cb3 = [WA+EnumProc]{
+      param($h, $l)
+      if (-not [WA]::IsWindowVisible($h)) { return $true }
+      $len = [WA]::GetWindowTextLength($h)
+      if ($len -le 0) { return $true }
+      $sb = New-Object System.Text.StringBuilder ($len + 1)
+      [WA]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null
+      $wt = $sb.ToString()
+      if ([string]::IsNullOrEmpty($wt)) { return $true }
+      $pn = "?"
+      $p3 = 0
+      [WA]::GetWindowThreadProcessId($h, [ref]$p3) | Out-Null
+      try { $pn = (Get-Process -Id $p3 -ErrorAction Stop).ProcessName } catch {}
+      Log ("  WIN proc='" + $pn + "' title='" + $wt + "'")
+      return $true
+    }.GetNewClosure()
+    [WA]::EnumWindows($cb3, [IntPtr]::Zero) | Out-Null
+  } catch { Log "dump err: $($_.Exception.Message)" }
 }
 
 # --- bring a specific window forward (IsIconic-aware restore) ---
@@ -611,7 +639,11 @@ function Show-TilePopup($tile) {
     $t = $tile.Tag
     $wins = @()
     try { $wins = Get-AppWindows $t.Proc $t.Title } catch { Log "popup enum err: $($_.Exception.Message)"; return }
-    if ($wins.Count -lt 1) { $script:pop.Hide(); $script:popTile = $null; return }
+    if ($wins.Count -lt 1) {
+      Log ("arrow: no windows matched [proc='" + $t.Proc + "' title='" + $t.Title + "'] - dumping all visible windows:")
+      Dump-AllWindows
+      $script:pop.Hide(); $script:popTile = $null; return
+    }
     $script:popTile = $tile
     $script:pop.Controls.Clear()
     $rowH = 34; $pad = 6
@@ -805,7 +837,7 @@ $tw = 300; $th = 190; $gap = 44
 $sx = [int](($scr.Width - ($tw * 3 + $gap * 2)) / 2)
 $ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
 $bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22 $null "(?i)otzar" $null))
-$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22 $null "(?i)soffice" $null))
+$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22 $null "(?i)soffice|libreoffice" $null))
 $bg.Controls.Add((New-Tile "PDF Files" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22 "__PDFARGS__" $null "PDF Files"))
 $cred = New-Object System.Windows.Forms.Label
 $cred.Text = "Built by Shalom Karr (216) 451-6698"
@@ -820,7 +852,7 @@ $bar.StartPosition = "Manual"
 $bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
 $bar.BackColor = $colTile
 $tileOtzar = New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null
-$tileLibre = New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice" $null
+$tileLibre = New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice|libreoffice" $null
 $tilePdf   = New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"
 $bar.Controls.Add($tileOtzar)
 $bar.Controls.Add($tileLibre)
