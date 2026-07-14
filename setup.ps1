@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.3'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.4'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -158,6 +158,7 @@ if (Test-Path $LibreOfficeExe) { $AllowFolders += (Split-Path (Split-Path $Libre
 Slog ("Allowed apps -> LibreOffice='{0}' exists={1} allowed={2}" -f $LibreOfficeExe, (Test-Path $LibreOfficeExe), (Test-Allowed $LibreOfficeExe)) "Green"
 
 # ---------------- build the program list ----------------
+Slog "Scanning installed programs to build the block list..." "Cyan"
 $sh = New-Object -ComObject WScript.Shell
 $found = New-Object System.Collections.Generic.List[string]
 
@@ -342,6 +343,7 @@ if ($Undo) {
 Write-Host "  lock-screen network UI $(if($Undo){'restored'}else{'hidden'}); Spooler running; printer add/remove locked (print-only)." -ForegroundColor Green
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
+Slog "Editing the kiosk user hive: policies + launcher shell + writing launcher scripts..." "Cyan"
 $line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
 if ($line -and ($line -match '\s(\d+)\s+(Active|Disc)')) {
     Write-Host "Signing out Otzar session $($matches[1]) ..." -ForegroundColor Cyan
@@ -909,6 +911,12 @@ $badgeTmr.Add_Tick({
   } catch { Log "badgeTmr err: $($_.Exception.Message)" }
 })
 $badgeTmr.Start()
+# one-shot ~8s after boot: dump every visible window (process + title) to kiosk.log so the admin can
+# see exactly what is open and fix the taskbar matchers - no user action needed.
+$dumpTmr = New-Object System.Windows.Forms.Timer
+$dumpTmr.Interval = 8000
+$dumpTmr.Add_Tick({ try { Log "=== startup window dump (proc + title of every visible window) ==="; Dump-AllWindows } catch {}; $this.Stop(); $this.Dispose() })
+$dumpTmr.Start()
 $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
@@ -1281,5 +1289,5 @@ if ((-not $Undo) -and (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyConti
     Write-Host "Set '$OtzarUser' to a BLANK password (logs in with no password)." -ForegroundColor Green
 }
 
-Write-Host "`nDone. Reboot or sign into '$OtzarUser' to verify." -ForegroundColor Magenta
+Slog "===== setup.ps1 DONE. Reboot or sign into '$OtzarUser' to verify. =====" "Magenta"
 if (-not $Undo) { Write-Host "Escape hatch: Ctrl+Alt+Del -> Switch user -> khaly (admin, unaffected)." -ForegroundColor Cyan }
