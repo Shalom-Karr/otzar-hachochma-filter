@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.5'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.6'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -69,6 +69,7 @@ function Slog([string]$m, [string]$color = "Gray") {
     try { Add-Content -LiteralPath "$PubLog\setup.log" -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {}
 }
 Slog "===== setup.ps1 starting: user='$OtzarUser' ListOnly=$ListOnly Undo=$Undo InstallApps=$InstallApps =====" "Cyan"
+Slog "GitHub Pages: https://shalom-karr.github.io/otzar-hachochma-filter  (version + scripts + /errors log board)" "DarkGray"
 
 # ---- the account must already exist (run create.ps1 first, then log into it once) ----
 if ((-not $Undo) -and (-not (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue))) {
