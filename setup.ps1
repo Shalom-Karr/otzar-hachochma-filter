@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.7'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.8'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -257,6 +257,22 @@ foreach ($root in @('D:\', "$env:ProgramFiles", "${env:ProgramFiles(x86)}", "$en
 foreach ($a in ($forceDeny | Sort-Object -Unique)) { if ($deny -notcontains $a) { $deny += $a } }
 if ($forceDeny) { Write-Host "Force-denied remote-access tools: $($forceDeny.Count)" -ForegroundColor DarkGray }
 
+# Scan the Otzar drive (D:\) and block EVERY exe on it except the Otzar launcher (its Hebrew-named exe).
+# D:\ is broadly allowed for Otzar's books, so a browser dropped there - even RENAMED (D:\Chrome\wb.exe) -
+# would otherwise run. Blocking by folder/scan (not by name) catches renamed copies.
+$dBadRe = '(?i)anydesk|teamviewer|otzarkiosk|tv_|winvnc|vncviewer|ultravnc|rustdesk|splashtop|remotepc|getscreen'
+$dLauncher = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { ($_.Name -notmatch $dBadRe) -and ($_.BaseName -match '[^\x00-\x7F]') } | Sort-Object { $_.Name.Length } | Select-Object -First 1).FullName
+if (-not $dLauncher) { $dLauncher = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch $dBadRe } | Select-Object -First 1).FullName }
+$dCount = 0
+Get-ChildItem 'D:\' -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object {
+    if (($_.FullName -ne $dLauncher) -and ($_.Name -ne 'OtzarKiosk.exe')) {
+        if ($deny -notcontains $_.FullName) { $deny += $_.FullName; $dCount++ }
+    }
+}
+# also deny the whole D:\Chrome FOLDER (path + contents) so the path is hidden and nothing there can run
+foreach ($cd in @('D:\Chrome')) { if ((Test-Path -LiteralPath $cd) -and ($deny -notcontains $cd)) { $deny += $cd } }
+Slog "Scanned D:\ - blocking $dCount exe(s) on the books drive + the Chrome folder; Otzar launcher stays allowed." "DarkGray"
+
 # Block File Explorer + the Settings app for the user (tested: the explorer.exe deny was NOT the cause
 # of the env-var error, so it's safe to keep it blocked). The kiosk shell + policies also remove any
 # way to OPEN a File Explorer window.
@@ -387,6 +403,7 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $srch2 /v BingSearchEnabled          /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLAllowlist" /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /f 2>$null | Out-Null
         reg delete $exp   /v HideSCANetwork             /f 2>$null | Out-Null
         reg delete $net   /v NC_LanChangeProperties     /f 2>$null | Out-Null
         reg delete $net   /v NC_ShowSharedAccessUI      /f 2>$null | Out-Null
@@ -415,6 +432,12 @@ if ($LASTEXITCODE -ne 0) {
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 3 /t REG_SZ /d "ftp://*"   /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 4 /t REG_SZ /d "ws://*"    /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 5 /t REG_SZ /d "wss://*"   /f | Out-Null
+        # Chrome URL filtering (Chrome is also BLOCKED from running; this blocks the web if it ever launches).
+        reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 2 /t REG_SZ /d "https://*" /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 3 /t REG_SZ /d "ftp://*"   /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 4 /t REG_SZ /d "ws://*"    /f | Out-Null
+        reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 5 /t REG_SZ /d "wss://*"   /f | Out-Null
         # Keyboard layouts for the Otzar user (built into Windows; switch with Left Alt+Shift / Win+Space)
         reg add "HKU\LockAll\Keyboard Layout\Preload" /v 1 /t REG_SZ /d "0000040d" /f | Out-Null   # Hebrew (primary)
         reg add "HKU\LockAll\Keyboard Layout\Preload" /v 2 /t REG_SZ /d "00000409" /f | Out-Null   # English (secondary)
@@ -933,7 +956,7 @@ $bar.Show()
 '@
             $kioskExe    = Join-Path $kiosk "kioskbar.exe"
             $browserPs1  = Join-Path $kiosk "pdfbrowser.ps1"
-            $pdfArgs     = "-NoProfile -Sta -ExecutionPolicy Bypass -File $browserPs1"
+            $pdfArgs     = "-NoProfile -Sta -WindowStyle Hidden -ExecutionPolicy Bypass -File $browserPs1"
             $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $kioskExe).Replace('__PDFARGS__', $pdfArgs)
             $barPs1 = Join-Path $kiosk "kioskbar.ps1"
             Set-Content -Path $barPs1 -Value $barBody -Encoding ASCII
@@ -944,6 +967,12 @@ param([string]$ProfileDir = "__ROOT__")
 try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+# hide this PowerShell console window - the WinForms browser window itself still shows
+try {
+  Add-Type -Name Win32Hide -Namespace Kiosk -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);'
+  [Kiosk.Win32Hide]::ShowWindow([Kiosk.Win32Hide]::GetConsoleWindow(), 0) | Out-Null
+} catch {}
 
 $LogDir = "C:\Users\Public\Documents\OtzarKiosk"
 try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
