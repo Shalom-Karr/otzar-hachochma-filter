@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.8'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.9'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -265,8 +265,8 @@ $dLauncher = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Obj
 if (-not $dLauncher) { $dLauncher = (Get-ChildItem 'D:\*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch $dBadRe } | Select-Object -First 1).FullName }
 $dCount = 0
 Get-ChildItem 'D:\' -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object {
-    if (($_.FullName -ne $dLauncher) -and ($_.Name -ne 'OtzarKiosk.exe')) {
-        if ($deny -notcontains $_.FullName) { $deny += $_.FullName; $dCount++ }
+    if (($_.FullName -ne $dLauncher) -and ($_.Name -ne 'OtzarKiosk.exe') -and ($_.FullName -notlike 'D:\Kiosk\*')) {
+        if ($deny -notcontains $_.FullName) { $deny += $_.FullName; $dCount++ }   # D:\Kiosk = our own shell/bar - never deny
     }
 }
 # also deny the whole D:\Chrome FOLDER (path + contents) so the path is hidden and nothing there can run
@@ -486,6 +486,9 @@ if ($LASTEXITCODE -ne 0) {
             # renamed copies: wscript = the shell (bulletproof), powershell = runs the WinForms bar
             Copy-Item "$env:windir\System32\wscript.exe" (Join-Path $kiosk "kioskshell.exe") -Force
             Copy-Item "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe" (Join-Path $kiosk "kioskbar.exe") -Force
+            # the kiosk's own shell/bar live on D:\ - actively CLEAR any deny (e.g. left by an earlier D:\ scan) so they run
+            Set-ExeDeny (Join-Path $kiosk "kioskshell.exe") $false
+            Set-ExeDeny (Join-Path $kiosk "kioskbar.exe")   $false
 
             $barBody = @'
 try {
