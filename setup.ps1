@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.9'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.10'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -432,6 +432,32 @@ if ($LASTEXITCODE -ne 0) {
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 3 /t REG_SZ /d "ftp://*"   /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 4 /t REG_SZ /d "ws://*"    /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v 5 /t REG_SZ /d "wss://*"   /f | Out-Null
+        # block Edge INTERNAL pages (settings/flags/extensions/the surf game/tools/etc.) by exact name.
+        # edge://print is intentionally KEPT so PDF printing still works; file:// is left allowed for the viewer.
+        $edgeInternal = @(
+          'edge://about','edge://accessibility','edge://actor-internals','edge://agent-internals','edge://app-service-internals',
+          'edge://application-guard-internals','edge://apps','edge://attribution-internals','edge://autofill-internals','edge://blob-internals',
+          'edge://bluetooth-internals','edge://browser-essentials','edge://chrome-finds-internals','edge://commerce-internals','edge://compat',
+          'edge://components','edge://conflicts','edge://connectors-internals','edge://crashes','edge://credits',
+          'edge://data-viewer','edge://device-log','edge://discards','edge://download-internals','edge://downloads',
+          'edge://edge-dlp-internals','edge://edge-urls','edge://enp','edge://extensions','edge://extensions-internals',
+          'edge://favorites','edge://flags','edge://gpu','edge://help','edge://histograms',
+          'edge://history','edge://history-clusters-internals','edge://indexeddb-internals','edge://inspect','edge://interstitials',
+          'edge://launch-source','edge://local-state','edge://mam-internals','edge://management','edge://media-engagement',
+          'edge://media-internals','edge://metrics-internals','edge://modules','edge://net-export','edge://net-internals',
+          'edge://network-errors','edge://newtab','edge://ntp-tiles-internals','edge://omnibox','edge://on-device-internals',
+          'edge://optimization-guide-internals','edge://password-manager','edge://password-manager-internals','edge://policy','edge://pre-launch-fre',
+          'edge://predictors','edge://prefs-internals','edge://private-aggregation-internals','edge://process-internals','edge://profile-internals',
+          'edge://push-internals','edge://quota-internals','edge://sandbox','edge://security-diagnostics','edge://serviceworker-internals',
+          'edge://settings','edge://signin-internals','edge://site-engagement','edge://skills','edge://subresource-filter-internals',
+          'edge://suggest-internals','edge://sync-internals','edge://system','edge://tab-search.top-chrome','edge://tabs-from-other-devices.top-chrome',
+          'edge://terms','edge://topics-internals','edge://tracing','edge://translate-internals','edge://ukm',
+          'edge://updater','edge://usb-internals','edge://user-actions','edge://version','edge://wallet',
+          'edge://wallet/passwords','edge://web-app-internals','edge://webnn-internals','edge://webrtc-internals','edge://webrtc-logs',
+          'edge://webui-browser','edge://webui-toolbar.top-chrome','edge://webxr-internals','edge://workspaces-internals'
+        )
+        $vi = 6
+        foreach ($u in $edgeInternal) { reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v $vi /t REG_SZ /d $u /f | Out-Null; $vi++ }
         # Chrome URL filtering (Chrome is also BLOCKED from running; this blocks the web if it ever launches).
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 2 /t REG_SZ /d "https://*" /f | Out-Null
