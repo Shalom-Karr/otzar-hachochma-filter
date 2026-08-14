@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.11'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.12'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -532,6 +532,7 @@ public class WA {
   [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, ref RECT r, uint c);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool LockWorkStation();
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -954,7 +955,7 @@ Register-BarTile $tileLibre $bar
 Register-BarTile $tilePdf   $bar
 # language toggle button (left of the credit label)
 $btnLang = New-Object System.Windows.Forms.Button
-$btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 490), 12, 90, 48)
+$btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 530), 12, 90, 48)
 $btnLang.FlatStyle = "Flat"; $btnLang.FlatAppearance.BorderSize = 0
 $btnLang.ForeColor = [System.Drawing.Color]::White
 $btnLang.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
@@ -965,11 +966,25 @@ $btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,
 $btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
 $btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
 $bar.Controls.Add($btnLang)
+# Admin Login button (just before the credit) - locks to the sign-in screen (Win+L equivalent)
+# so you can switch to the admin account (khaly) from the lock screen's user picker.
+$btnAdmin = New-Object System.Windows.Forms.Button
+$btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 430), 12, 150, 48)
+$btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
+$btnAdmin.ForeColor = [System.Drawing.Color]::White
+$btnAdmin.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnAdmin.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
+$btnAdmin.Cursor = "Hand"
+$btnAdmin.Anchor = "Top,Right"
+$btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+$btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnAdmin.Add_Click({ try { Log "admin login: locking workstation"; [WA]::LockWorkStation() | Out-Null } catch { Log "lock failed: $($_.Exception.Message)" } })
+$bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
 $barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
 $barCred.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 390), 20, 370, 30)
+$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 270), 20, 250, 30)
 $barCred.Anchor = "Top,Right"
 $bar.Controls.Add($barCred)
 # ~1s timer to keep the language label in sync with the focused app
