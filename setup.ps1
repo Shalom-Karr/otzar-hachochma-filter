@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.10'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.11'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -554,6 +554,33 @@ $LogDir = "C:\Users\Public\Documents\OtzarKiosk"
 try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
 function Log($m) { try { Add-Content -LiteralPath "$LogDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
 Log "launcher started"
+# --- block the Windows key (kills Win+A Quick Settings, Win+I, Win+X, Start, etc.) ---
+# A low-level keyboard hook is the only reliable way with a custom shell; the NoWinKeys policy does not
+# apply because Explorer is not the shell. This CANNOT block Ctrl+Alt+Del, so the admin hatch still works.
+try {
+  Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class KHook {
+  public delegate IntPtr Proc(int nCode, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int idHook, Proc lpfn, IntPtr hMod, uint dwThreadId);
+  [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+  [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string lpModuleName);
+}
+"@
+  $script:khProc = [KHook+Proc]{
+    param($nCode, $wParam, $lParam)
+    try {
+      if ($nCode -ge 0) {
+        $vk = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam)   # vkCode = first field of KBDLLHOOKSTRUCT
+        if ($vk -eq 0x5B -or $vk -eq 0x5C) { return [IntPtr]1 }              # swallow Left/Right Windows key
+      }
+    } catch {}
+    return [KHook]::CallNextHookEx([IntPtr]::Zero, $nCode, $wParam, $lParam)
+  }
+  $script:khHook = [KHook]::SetWindowsHookEx(13, $script:khProc, [KHook]::GetModuleHandle($null), 0)   # WH_KEYBOARD_LL = 13
+  if ($script:khHook -eq [IntPtr]::Zero) { Log "WARN: Windows-key hook NOT installed" } else { Log "Windows-key blocked (low-level keyboard hook installed)" }
+} catch { Log "keyboard hook error: $($_.Exception.Message)" }
 $colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
 $colTile = [System.Drawing.Color]::FromArgb(30,41,59)
 
