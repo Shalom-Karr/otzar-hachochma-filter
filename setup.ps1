@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.13'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.14'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -401,6 +401,8 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $exp   /v NoRun                      /f 2>$null | Out-Null
         reg delete $exp   /v NoControlPanel             /f 2>$null | Out-Null
         reg delete $exp   /v NoWinKeys                  /f 2>$null | Out-Null
+        reg delete $exp   /v NoLogoff                   /f 2>$null | Out-Null
+        reg delete $exp   /v NoClose                    /f 2>$null | Out-Null
         reg delete $srch1 /v DisableSearchBoxSuggestions /f 2>$null | Out-Null
         reg delete $srch2 /v BingSearchEnabled          /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /f 2>$null | Out-Null
@@ -427,6 +429,8 @@ if ($LASTEXITCODE -ne 0) {
         reg add $exp   /v NoRun                      /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoControlPanel             /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoWinKeys                  /t REG_DWORD /d 1 /f | Out-Null   # disable Win+key shortcuts (Win+I/Win+E...)
+        reg add $exp   /v NoLogoff                   /t REG_DWORD /d 1 /f | Out-Null   # remove "Sign out" from Ctrl+Alt+Del + Start
+        reg add $exp   /v NoClose                    /t REG_DWORD /d 1 /f | Out-Null   # remove Shut Down/Restart/Sleep from Ctrl+Alt+Del + Start (UI only; API still works)
         reg add $srch1 /v DisableSearchBoxSuggestions /t REG_DWORD /d 1 /f | Out-Null
         reg add $srch2 /v BingSearchEnabled          /t REG_DWORD /d 0 /f | Out-Null
         # keep Edge as the PDF viewer but block ALL web browsing (local files only)
@@ -971,8 +975,8 @@ $btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,
 $btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
 $btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
 $bar.Controls.Add($btnLang)
-# Admin Login button (just before the credit) - signs the kiosk user OUT to the login screen so you can
-# log in as the admin account (khaly). Lock/Win+L is disabled, so this uses sign-out (force) instead.
+# Admin Login button (just before the credit) - RESTARTS the PC (with a confirm) so you land on the login
+# screen and can log in as admin (khaly). Lock/Win+L and Sign-out are disabled, so restart is the way in.
 $btnAdmin = New-Object System.Windows.Forms.Button
 $btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 430), 12, 150, 48)
 $btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
@@ -983,7 +987,12 @@ $btnAdmin.Cursor = "Hand"
 $btnAdmin.Anchor = "Top,Right"
 $btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
 $btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
-$btnAdmin.Add_Click({ try { Log "admin login: signing out to the login screen"; [WA]::ExitWindowsEx(4, 0) | Out-Null } catch { Log "sign-out failed: $($_.Exception.Message)" } })   # EWX_LOGOFF(0)|EWX_FORCE(4)
+$btnAdmin.Add_Click({
+  try {
+    $r = [System.Windows.Forms.MessageBox]::Show($bar, "Restart the computer to log in as the administrator?", "Admin Login", "YesNo", "Question")
+    if ($r -eq "Yes") { Log "admin login: restarting to the login screen"; Restart-Computer -Force }
+  } catch { Log "admin restart failed: $($_.Exception.Message)" }
+})
 $bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
