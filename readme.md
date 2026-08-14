@@ -131,7 +131,15 @@ Example: `.\setup.ps1 -AllowFolders "E:\"` if the Otzar drive is `E:`.
 
 ## License
 
-Licensed under the **PolyForm Noncommercial License 1.0.0** (see `LICENSE`).
-You may **use, modify, and share** these scripts for any **noncommercial** purpose
-(personal use, a shul/nonprofit, education, research). **Commercial use — including
-selling them or bundling them into a paid product or service — is not permitted.**
+Licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International License (CC BY-NC-SA 4.0)** by **Shalom Karr** (see `LICENSE`).
+
+You may **use, share, and adapt** this work for any **noncommercial** purpose
+(personal use, a shul/nonprofit, education, research), provided you:
+
+- **give credit** to Shalom Karr (attribution),
+- **do not use it commercially** or sell it / bundle it into a paid product or service, and
+- **release any derivative works under this same license** (share-alike — keep it open source).
+
+- Summary: <https://creativecommons.org/licenses/by-nc-sa/4.0/>
+- Full legal code: <https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.en>
