@@ -47,7 +47,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.12'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.13'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -396,6 +396,8 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $sys   /v DisableCMD                 /f 2>$null | Out-Null
         reg delete $sys   /v DisableRegistryTools       /f 2>$null | Out-Null
         reg delete $sys   /v DisableChangePassword      /f 2>$null | Out-Null
+        reg delete $sys   /v DisableLockWorkstation     /f 2>$null | Out-Null
+        reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /f 2>$null | Out-Null
         reg delete $exp   /v NoRun                      /f 2>$null | Out-Null
         reg delete $exp   /v NoControlPanel             /f 2>$null | Out-Null
         reg delete $exp   /v NoWinKeys                  /f 2>$null | Out-Null
@@ -420,6 +422,8 @@ if ($LASTEXITCODE -ne 0) {
         reg add $sys   /v DisableRegistryTools       /t REG_DWORD /d 1 /f | Out-Null
         # NOTE: DisableCMD intentionally NOT set - Otzar needs cmd.exe to run at startup.
         reg add $sys   /v DisableChangePassword      /t REG_DWORD /d 1 /f | Out-Null   # remove "Change a password" on Ctrl+Alt+Del
+        reg add $sys   /v DisableLockWorkstation     /t REG_DWORD /d 1 /f | Out-Null   # disable Win+L AND "Lock" on Ctrl+Alt+Del
+        reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /t REG_DWORD /d 1 /f | Out-Null   # remove "Switch user" on Ctrl+Alt+Del
         reg add $exp   /v NoRun                      /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoControlPanel             /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoWinKeys                  /t REG_DWORD /d 1 /f | Out-Null   # disable Win+key shortcuts (Win+I/Win+E...)
@@ -533,6 +537,7 @@ public class WA {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool LockWorkStation();
+  [DllImport("user32.dll")] public static extern bool ExitWindowsEx(uint uFlags, uint dwReason);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -966,8 +971,8 @@ $btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,
 $btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
 $btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
 $bar.Controls.Add($btnLang)
-# Admin Login button (just before the credit) - locks to the sign-in screen (Win+L equivalent)
-# so you can switch to the admin account (khaly) from the lock screen's user picker.
+# Admin Login button (just before the credit) - signs the kiosk user OUT to the login screen so you can
+# log in as the admin account (khaly). Lock/Win+L is disabled, so this uses sign-out (force) instead.
 $btnAdmin = New-Object System.Windows.Forms.Button
 $btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 430), 12, 150, 48)
 $btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
@@ -978,7 +983,7 @@ $btnAdmin.Cursor = "Hand"
 $btnAdmin.Anchor = "Top,Right"
 $btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
 $btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
-$btnAdmin.Add_Click({ try { Log "admin login: locking workstation"; [WA]::LockWorkStation() | Out-Null } catch { Log "lock failed: $($_.Exception.Message)" } })
+$btnAdmin.Add_Click({ try { Log "admin login: signing out to the login screen"; [WA]::ExitWindowsEx(4, 0) | Out-Null } catch { Log "sign-out failed: $($_.Exception.Message)" } })   # EWX_LOGOFF(0)|EWX_FORCE(4)
 $bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
