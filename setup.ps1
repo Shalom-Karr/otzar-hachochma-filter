@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.4'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.5'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -410,6 +410,7 @@ if ($LASTEXITCODE -ne 0) {
         reg delete $srch2 /v BingSearchEnabled          /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLAllowlist" /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /f 2>$null | Out-Null
         reg delete $exp   /v HideSCANetwork             /f 2>$null | Out-Null
         reg delete $net   /v NC_LanChangeProperties     /f 2>$null | Out-Null
@@ -469,6 +470,9 @@ if ($LASTEXITCODE -ne 0) {
         )
         $vi = 6
         foreach ($u in $edgeInternal) { reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /v $vi /t REG_SZ /d $u /f | Out-Null; $vi++ }
+        # hide Edge's built-in "Save as PDF" print destination - on a kiosk it silently "prints"
+        # nothing physical and never reaches the print gate. Real printers are unaffected.
+        reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /v 1 /t REG_SZ /d "pdf" /f | Out-Null
         # Chrome URL filtering (Chrome is also BLOCKED from running; this blocks the web if it ever launches).
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 2 /t REG_SZ /d "https://*" /f | Out-Null
@@ -1322,7 +1326,7 @@ function Get-PgPrinters { try { return @(Get-Printer -ErrorAction SilentlyContin
 if ($script:pgOn) {
   $script:pgPrinters = Get-PgPrinters
   $printTmr = New-Object System.Windows.Forms.Timer
-  $printTmr.Interval = 350
+  $printTmr.Interval = 200
   $printTmr.Add_Tick({
     if ($script:pgBusy) { return }
     $script:pgBusy = $true
@@ -1337,14 +1341,19 @@ if ($script:pgOn) {
         foreach ($j in $jobs) {
           $key = "$pn|$($j.Id)"; $cur[$key] = $true
           if ($script:pgSeen.ContainsKey($key)) { continue }
-          # Do NOT touch a job while it is still spooling - suspending mid-spool makes the app
-          # hang on "Waiting for printer connection...". Wait until it is fully sent to the queue,
-          # then hold it and show the confirm popup.
+          # Hold a job the moment it is done spooling - not while JobStatus is empty (a brand-new
+          # job the spooler has not stamped yet) or says Spooling. Suspending mid-spool freezes
+          # the sending app ("Waiting for printer connection...") and reads a half-counted page
+          # number (TotalPages climbs 0,1,2,... while the job spools and is final at spool end).
+          # Do NOT wait longer than that: a fast printer can grab and finish the job in well
+          # under a second once spooling ends.
           $jst = ''; try { $jst = [string]$j.JobStatus } catch {}
-          if ($jst -match 'Spooling') { continue }
+          if ($jst -eq '' -or $jst -match 'Spooling') { continue }
+          $pages = 0; try { $pages = [int]$j.TotalPages } catch {}
           $script:pgSeen[$key] = $true
           try { Suspend-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue } catch {}
-          $pages = 0; try { $pages = [int]$j.TotalPages } catch {}
+          # re-read now that the job is held - some drivers finish counting pages late
+          try { $j2 = Get-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue; if ($j2 -and [int]$j2.TotalPages -gt $pages) { $pages = [int]$j2.TotalPages } } catch {}
           [void]$new.Add(@{ Pn = $pn; Id = $j.Id; Doc = "$($j.DocumentName)"; Pages = $pages })
         }
       }
