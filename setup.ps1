@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.5'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.6'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1242,7 +1242,7 @@ function Show-PrintDialog($doc, $pages, $rate, $cur) {
     $rateTxt = '{0:N2}' -f $rate
     if ([int]$pages -gt 0) {
       $priceTxt = "$cur" + ('{0:N2}' -f ($pages * $rate)); $chipTxt = "$pages pages"; $calcTxt = "$pages x $cur$rateTxt"
-    } else { $priceTxt = "$cur--"; $chipTxt = "page count unknown"; $calcTxt = "page count not available" }
+    } else { $priceTxt = "$cur$rateTxt / page"; $chipTxt = "page count unknown"; $calcTxt = "pay for each page the printer puts out" }
     $cLine  = [System.Drawing.Color]::FromArgb(42,59,88)
     $cInk   = [System.Drawing.Color]::FromArgb(233,237,246)
     $cMuted = [System.Drawing.Color]::FromArgb(147,163,184)
