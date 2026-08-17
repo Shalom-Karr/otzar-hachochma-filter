@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.2'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.3'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -594,8 +594,8 @@ public class KHook {
   $script:khHook = [KHook]::SetWindowsHookEx(13, $script:khProc, [KHook]::GetModuleHandle($null), 0)   # WH_KEYBOARD_LL = 13
   if ($script:khHook -eq [IntPtr]::Zero) { Log "WARN: Windows-key hook NOT installed" } else { Log "Windows-key blocked (low-level keyboard hook installed)" }
 } catch { Log "keyboard hook error: $($_.Exception.Message)" }
-$colBg   = [System.Drawing.Color]::FromArgb(15,23,42)
-$colTile = [System.Drawing.Color]::FromArgb(30,41,59)
+$colBg   = [System.Drawing.Color]::FromArgb(244,239,227)
+$colTile = [System.Drawing.Color]::FromArgb(255,253,248)
 
 # --- find a running window: by process-name regex OR by window-title substring ---
 function Find-AppWindow($procRe, $titleMatch) {
@@ -702,10 +702,13 @@ $script:pop.FormBorderStyle = "None"
 $script:pop.TopMost = $true
 $script:pop.ShowInTaskbar = $false
 $script:pop.StartPosition = "Manual"
-$script:pop.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$script:pop.BackColor = [System.Drawing.Color]::FromArgb(255,253,248)
 $script:pop.Width = 360
 $script:pop.Height = 40
 $script:pop.Visible = $false
+# 1px light border around the popup so it reads on the light desktop (#ddd3bd)
+$popBorder = [System.Drawing.Color]::FromArgb(221,211,189)
+$script:pop.Add_Paint({ param($snd, $e); $pen = New-Object System.Drawing.Pen($popBorder, 1); $e.Graphics.DrawRectangle($pen, 0, 0, ($snd.Width - 1), ($snd.Height - 1)); $pen.Dispose() }.GetNewClosure())
 $script:popTile = $null   # the tile the popup currently belongs to
 
 # hide the popup only when the cursor is over NEITHER the tile NOR the popup
@@ -758,8 +761,8 @@ function Show-TilePopup($tile) {
       $rowW = 360 - $pad * 2
       $row = New-Object System.Windows.Forms.Label
       $row.Text = (Fit-Text $w.Title 42)
-      $row.ForeColor = [System.Drawing.Color]::White
-      $row.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+      $row.ForeColor = [System.Drawing.Color]::FromArgb(58,74,88)
+      $row.BackColor = [System.Drawing.Color]::FromArgb(255,253,248)
       $row.Font = New-Object System.Drawing.Font("Segoe UI", 11)
       $row.TextAlign = "MiddleLeft"
       $row.SetBounds($pad, $y, $rowW, $rowH)
@@ -767,8 +770,8 @@ function Show-TilePopup($tile) {
       # leave room on the right so the "X" button never overlaps the title text
       $row.Padding = New-Object System.Windows.Forms.Padding(8,0,($closeW + 6),0)
       $row.Tag = $w.Hwnd
-      $row.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
-      $row.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+      $row.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(244,239,227) })
+      $row.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(255,253,248) })
       $row.Add_Click({
         try {
           $hwnd = $this.Tag
@@ -783,8 +786,8 @@ function Show-TilePopup($tile) {
       $closeBtn = New-Object System.Windows.Forms.Button
       $closeBtn.Text = "X"
       $closeBtn.FlatStyle = "Flat"; $closeBtn.FlatAppearance.BorderSize = 0
-      $closeBtn.ForeColor = [System.Drawing.Color]::White
-      $closeBtn.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+      $closeBtn.ForeColor = [System.Drawing.Color]::FromArgb(214,69,69)
+      $closeBtn.BackColor = [System.Drawing.Color]::FromArgb(255,253,248)
       $closeBtn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
       $closeBtn.Cursor = "Hand"
       $closeBtn.TabStop = $false
@@ -792,8 +795,8 @@ function Show-TilePopup($tile) {
       $closeBtn.SetBounds(($pad + $rowW - $closeW - 2), $cy, $closeW, $closeW)
       # keep the hwnd AND the owning tile on the button so the handler can close + refresh
       $closeBtn.Tag = @{ Hwnd = $w.Hwnd; Tile = $tile; Title = $w.Title }
-      $closeBtn.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(190,60,60) })
-      $closeBtn.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+      $closeBtn.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(214,69,69); $this.ForeColor = [System.Drawing.Color]::White })
+      $closeBtn.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(255,253,248); $this.ForeColor = [System.Drawing.Color]::FromArgb(214,69,69) })
       $closeBtn.Add_Click({
         try {
           $d = $this.Tag
@@ -849,8 +852,8 @@ function Invoke-Launch($exe, $tileArgs, $procMatch, $titleMatch) {
 function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titleMatch) {
   $b = New-Object System.Windows.Forms.Button
   $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
-  $b.FlatStyle = "Flat"; $b.FlatAppearance.BorderSize = 0
-  $b.ForeColor = [System.Drawing.Color]::White; $b.BackColor = $colTile
+  $b.FlatStyle = "Flat"; $b.FlatAppearance.BorderSize = 1; $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(227,220,203)
+  $b.ForeColor = [System.Drawing.Color]::FromArgb(58,74,88); $b.BackColor = $colTile
   $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", $fs)
   $b.Cursor = "Hand"
   $b.Tag = @{ Exe = $exe; Args = $tileArgs; Proc = $procMatch; Title = $titleMatch }
@@ -867,8 +870,8 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
     $tmr.Add_Tick({ $x = $this.Tag; $x.B.Enabled = $true; $x.B.Text = $x.T; $this.Stop(); $this.Dispose() })
     $tmr.Start()
   })
-  $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
-  $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+  $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(244,239,227) })
+  $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(255,253,248) })
   return $b
 }
 
@@ -881,8 +884,8 @@ function Register-BarTile($tile, $badgeParent) {
     $arrow = New-Object System.Windows.Forms.Button
     $arrow.Text = "^"
     $arrow.FlatStyle = "Flat"; $arrow.FlatAppearance.BorderSize = 0
-    $arrow.ForeColor = [System.Drawing.Color]::White
-    $arrow.BackColor = [System.Drawing.Color]::FromArgb(51,65,85)
+    $arrow.ForeColor = [System.Drawing.Color]::FromArgb(58,74,88)
+    $arrow.BackColor = [System.Drawing.Color]::FromArgb(244,239,227)
     $arrow.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $arrow.Cursor = "Hand"
     $arrow.TabStop = $false
@@ -891,8 +894,8 @@ function Register-BarTile($tile, $badgeParent) {
     $arrow.Anchor = "Top,Right"
     $tile.Controls.Add($arrow)
     $arrow.BringToFront()
-    $arrow.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(71,85,105) })
-    $arrow.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
+    $arrow.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(227,220,203) })
+    $arrow.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(244,239,227) })
     # click the arrow -> show the window-list popup. Capture THIS tile explicitly.
     $capTile = $tile
     $arrow.Add_Click({ try { Show-TilePopup $capTile } catch { Log "arrow err: $($_.Exception.Message)" } }.GetNewClosure())
@@ -1027,19 +1030,13 @@ function New-CardBase($w, $h, $borderCol, $exe, $tileArgs, $procMatch, $titleMat
 $bg = New-Object System.Windows.Forms.Form
 $bg.FormBorderStyle = "None"; $bg.StartPosition = "Manual"
 $bg.Bounds = New-Object System.Drawing.Rectangle(0, 0, $scr.Width, ($scr.Height - $barH))
-$bg.BackColor = [System.Drawing.Color]::FromArgb(251, 247, 238)
+$bg.BackColor = [System.Drawing.Color]::FromArgb(244, 239, 227)
 $bg.Add_FormClosing({ if ($args[1].CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) { $args[1].Cancel = $true } })
-# soft warm vertical gradient over the whole desktop (top #fbf7ee -> bottom #ece5d5)
+# SOLID warm desktop background (#f4efe3): transparent branding labels copy this exact solid color,
+# so they blend perfectly - no more gradient "ghost box" artifacts. (No Paint handler on $bg.)
 $dw = $scr.Width; $dh = $scr.Height - $barH
-$gradTop = [System.Drawing.Color]::FromArgb(251, 247, 238)
-$gradBot = [System.Drawing.Color]::FromArgb(236, 229, 213)
-$bg.Add_Paint({
-  param($snd, $e)
-  $rc = New-Object System.Drawing.Rectangle(0, 0, $dw, $dh)
-  $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rc, $gradTop, $gradBot, 90)
-  $e.Graphics.FillRectangle($lg, $rc)
-  $lg.Dispose()
-}.GetNewClosure())
+# double-buffer the desktop (protected property, set via reflection) to avoid flicker on the solid fill
+try { ([type][System.Windows.Forms.Control]).GetProperty('DoubleBuffered',[System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($bg, $true, $null) } catch {}
 
 # ---- centered branding lockup (eyebrow / serif title / Desktop Filter pill) ----
 $eyebrow = New-Object System.Windows.Forms.Label
@@ -1147,7 +1144,10 @@ $bar = New-Object System.Windows.Forms.Form
 $bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
 $bar.StartPosition = "Manual"
 $bar.Bounds = New-Object System.Drawing.Rectangle(0, ($scr.Height - $barH), $scr.Width, $barH)
-$bar.BackColor = $colTile
+$bar.BackColor = [System.Drawing.Color]::FromArgb(239,232,216)
+# 1px top border (#ddd3bd) to separate the light bar from the light desktop above it
+$barTopBorder = [System.Drawing.Color]::FromArgb(221,211,189)
+$bar.Add_Paint({ param($snd, $e); $pen = New-Object System.Drawing.Pen($barTopBorder, 1); $e.Graphics.DrawLine($pen, 0, 0, $snd.Width, 0); $pen.Dispose() }.GetNewClosure())
 $tileOtzar = New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null
 $tileLibre = New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice|libreoffice" $null
 $tilePdf   = New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"
@@ -1161,14 +1161,14 @@ Register-BarTile $tilePdf   $bar
 # language toggle button (left of the credit label)
 $btnLang = New-Object System.Windows.Forms.Button
 $btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 670), 12, 90, 48)
-$btnLang.FlatStyle = "Flat"; $btnLang.FlatAppearance.BorderSize = 0
-$btnLang.ForeColor = [System.Drawing.Color]::White
-$btnLang.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnLang.FlatStyle = "Flat"; $btnLang.FlatAppearance.BorderSize = 1; $btnLang.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(227,220,203)
+$btnLang.ForeColor = [System.Drawing.Color]::FromArgb(58,74,88)
+$btnLang.BackColor = [System.Drawing.Color]::FromArgb(255,253,248)
 $btnLang.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
 $btnLang.Cursor = "Hand"
 $btnLang.Anchor = "Top,Right"
-$btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
-$btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(244,239,227) })
+$btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(255,253,248) })
 $btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
 $bar.Controls.Add($btnLang)
 # Admin Login button (just before the credit) - RESTARTS the PC (with a confirm) so you land on the login
@@ -1176,13 +1176,13 @@ $bar.Controls.Add($btnLang)
 $btnAdmin = New-Object System.Windows.Forms.Button
 $btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 570), 12, 150, 48)
 $btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
-$btnAdmin.ForeColor = [System.Drawing.Color]::White
-$btnAdmin.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
+$btnAdmin.ForeColor = [System.Drawing.Color]::FromArgb(244,239,227)
+$btnAdmin.BackColor = [System.Drawing.Color]::FromArgb(34,48,63)
 $btnAdmin.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
 $btnAdmin.Cursor = "Hand"
 $btnAdmin.Anchor = "Top,Right"
-$btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(51,65,85) })
-$btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
+$btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(49,67,95) })
+$btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(34,48,63) })
 $btnAdmin.Add_Click({
   try {
     $r = [System.Windows.Forms.MessageBox]::Show($bar, "Restart the computer to log in as the administrator?", "Admin Login", "YesNo", "Question")
@@ -1192,7 +1192,7 @@ $btnAdmin.Add_Click({
 $bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
-$barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
+$barCred.ForeColor = [System.Drawing.Color]::FromArgb(122,106,78)
 $barCred.Font = New-Object System.Drawing.Font("Segoe UI", 16)
 $barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 400), 15, 390, 42)
 $barCred.Anchor = "Top,Right"
