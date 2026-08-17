@@ -41,13 +41,16 @@ param(
         "Clipchamp","Todos","PowerAutomateDesktop","WindowsCamera","FeedbackHub","549981C3F5F10","Copilot"
     ),
     [bool]$InstallApps      = $false,  # winget-install LibreOffice ONLY if missing (off by default - avoids network/winget; pass -InstallApps $true to allow)
+    [bool]$PrintGate        = $true,   # hold each print job and require a confirm (page count + cost) before it prints
+    [double]$PricePerPage   = 0.10,    # cost shown per page in the print-confirm dialog (display only - no money is collected)
+    [string]$PrintCurrency  = '$',     # currency symbol shown in the print-confirm dialog
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
     [switch]$ListOnly,
     [switch]$Undo,
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.14'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.15'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1035,6 +1038,52 @@ $dumpTmr = New-Object System.Windows.Forms.Timer
 $dumpTmr.Interval = 8000
 $dumpTmr.Add_Tick({ try { Log "=== startup window dump (proc + title of every visible window) ==="; Dump-AllWindows } catch {}; $this.Stop(); $this.Dispose() })
 $dumpTmr.Start()
+# --- print gate: hold each spooled print job, confirm (document + page count + cost), then release or cancel ---
+$script:pgRate = __PGRATE__
+$script:pgCur  = '__PGCUR__'
+$script:pgOn   = __PGON__
+$script:pgSeen = @{}
+$script:pgPrinters = @()
+$script:pgRefresh = 0
+function Get-PgPrinters { try { return @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) } catch { return @() } }
+if ($script:pgOn) {
+  $script:pgPrinters = Get-PgPrinters
+  $printTmr = New-Object System.Windows.Forms.Timer
+  $printTmr.Interval = 350
+  $printTmr.Add_Tick({
+    try {
+      $script:pgRefresh++
+      if ($script:pgRefresh -ge 40) { $script:pgRefresh = 0; $script:pgPrinters = Get-PgPrinters }
+      $cur = @{}
+      $new = New-Object System.Collections.ArrayList
+      foreach ($pn in $script:pgPrinters) {
+        $jobs = @()
+        try { $jobs = @(Get-PrintJob -PrinterName $pn -ErrorAction SilentlyContinue) } catch {}
+        foreach ($j in $jobs) {
+          $key = "$pn|$($j.Id)"; $cur[$key] = $true
+          if ($script:pgSeen.ContainsKey($key)) { continue }
+          $script:pgSeen[$key] = $true
+          try { Suspend-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue } catch {}
+          $pages = 0; try { $pages = [int]$j.TotalPages } catch {}
+          [void]$new.Add(@{ Pn = $pn; Id = $j.Id; Doc = "$($j.DocumentName)"; Pages = $pages })
+        }
+      }
+      foreach ($n in $new) {
+        if ($n.Pages -gt 0) {
+          $cost = '{0:N2}' -f ($n.Pages * $script:pgRate)
+          $rate = '{0:N2}' -f $script:pgRate
+          $line = "$($n.Pages) page(s)   -   cost: $($script:pgCur)$cost   ($($n.Pages) x $($script:pgCur)$rate)"
+        } else { $line = "page count not available yet" }
+        $ans = [System.Windows.Forms.MessageBox]::Show($bar, "Print this document?`n`n$($n.Doc)`n`n$line", "Confirm Print", "OKCancel", "Question")
+        if ($ans -eq "OK") { try { Resume-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print OK: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print resume err: $($_.Exception.Message)" } }
+        else { try { Remove-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print CANCELLED: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print remove err: $($_.Exception.Message)" } }
+      }
+      foreach ($k in @($script:pgSeen.Keys)) { if (-not $cur.ContainsKey($k)) { $script:pgSeen.Remove($k) } }
+    } catch { Log "print gate err: $($_.Exception.Message)" }
+  })
+  $printTmr.Start()
+  Log ("print gate ON (rate " + $script:pgCur + ('{0:N2}' -f $script:pgRate) + "/page)")
+}
 $bar.Show()
 [System.Windows.Forms.Application]::Run($bg)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
@@ -1042,7 +1091,7 @@ $bar.Show()
             $kioskExe    = Join-Path $kiosk "kioskbar.exe"
             $browserPs1  = Join-Path $kiosk "pdfbrowser.ps1"
             $pdfArgs     = "-NoProfile -Sta -WindowStyle Hidden -ExecutionPolicy Bypass -File $browserPs1"
-            $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $kioskExe).Replace('__PDFARGS__', $pdfArgs)
+            $barBody = $barBody.Replace('__OTZAR__', $appPath).Replace('__LIBRE__', $LibreOfficeExe).Replace('__PDF__', $kioskExe).Replace('__PDFARGS__', $pdfArgs).Replace('__PGRATE__', $PricePerPage.ToString([System.Globalization.CultureInfo]::InvariantCulture)).Replace('__PGCUR__', $PrintCurrency).Replace('__PGON__', $(if ($PrintGate) { '$true' } else { '$false' }))
             $barPs1 = Join-Path $kiosk "kioskbar.ps1"
             Set-Content -Path $barPs1 -Value $barBody -Encoding ASCII
 
