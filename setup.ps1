@@ -42,7 +42,7 @@ param(
     ),
     [bool]$InstallApps      = $false,  # winget-install LibreOffice ONLY if missing (off by default - avoids network/winget; pass -InstallApps $true to allow)
     [bool]$PrintGate        = $true,   # hold each print job and require a confirm (page count + cost) before it prints
-    [double]$PricePerPage   = 0.10,    # cost shown per page in the print-confirm dialog (display only - no money is collected)
+    [double]$PricePerPage   = 0.25,    # cost shown per page in the print-confirm dialog (display only - no money is collected)
     [string]$PrintCurrency  = '$',     # currency symbol shown in the print-confirm dialog
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
     [switch]$ListOnly,
@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.15'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.16'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
