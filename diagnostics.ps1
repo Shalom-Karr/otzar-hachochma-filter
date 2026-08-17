@@ -47,6 +47,15 @@ function Invoke-KioskReport {
     $admins = (Get-LocalGroupMember Administrators -ErrorAction SilentlyContinue).SID.Value
     "Admin?  : " + [bool]($admins -contains $sid)
 
+    Write-Host "`n===== PRINTERS (kiosk needs a REAL one or Edge shows '0 pages') =====" -ForegroundColor Cyan
+    try {
+        Get-Printer -ErrorAction SilentlyContinue | ForEach-Object {
+            "  $($_.Name)  [driver: $($_.DriverName); port: $($_.PortName); status: $($_.PrinterStatus)]"
+        }
+        $dflt = (Get-CimInstance Win32_Printer -Filter "Default=TRUE" -ErrorAction SilentlyContinue).Name
+        "  default (this admin account): $dflt"
+    } catch { "  printer query failed: $($_.Exception.Message)" }
+
     Write-Host "`n===== PROFILES (duplicate = the bug) =====" -ForegroundColor Cyan
     Get-ChildItem C:\Users -Directory -ErrorAction SilentlyContinue | Where-Object Name -like "*$OtzarUser*" | Select-Object Name | Format-Table -AutoSize
     $prof = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue).LocalPath

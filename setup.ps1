@@ -45,12 +45,15 @@ param(
     [double]$PricePerPage   = 0.25,    # cost shown per page in the print-confirm dialog (display only - no money is collected)
     [string]$PrintCurrency  = '$',     # currency symbol shown in the print-confirm dialog
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
+    [string]$PrinterIP      = '',      # one-time: auto-install a network printer at this IP (e.g. 192.168.9.70) so the kiosk has a REAL printer, and make it the kiosk user's default
+    [string]$PrinterQueue   = 'Xerox WorkCentre 3215',   # queue name for the auto-installed printer
+    [string]$PrinterDriver  = '',      # exact driver name for it; empty = best installed match is picked
     [switch]$ListOnly,
     [switch]$Undo,
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.6'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.7'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -371,6 +374,35 @@ if ($Undo) {
 }
 Write-Host "  lock-screen network UI $(if($Undo){'restored'}else{'hidden'}); Spooler running; printer add/remove locked (print-only)." -ForegroundColor Green
 
+# ---------------- 3b. optional: install a real network printer (-PrinterIP) ----------------
+# Kiosk PCs often only have "Microsoft Print to PDF", so Edge's preview shows "0 pages" and
+# nothing physical can print. Pass -PrinterIP once to install the shul printer machine-wide.
+if (-not $Undo -and $PrinterIP -ne '') {
+    Slog "Installing network printer '$PrinterQueue' at $PrinterIP ..." "Cyan"
+    try {
+        if (Get-Printer -Name $PrinterQueue -ErrorAction SilentlyContinue) {
+            Write-Host "  printer '$PrinterQueue' already installed." -ForegroundColor Green
+        } else {
+            $ppName = "IP_$PrinterIP"
+            if (-not (Get-PrinterPort -Name $ppName -ErrorAction SilentlyContinue)) { Add-PrinterPort -Name $ppName -PrinterHostAddress $PrinterIP }
+            $drv = $null
+            if ($PrinterDriver -ne '') { $drv = Get-PrinterDriver -Name $PrinterDriver -ErrorAction SilentlyContinue }
+            if (-not $drv) {
+                foreach ($cand in @("*$PrinterQueue*", 'Xerox*Class Driver*', 'Xerox*')) {
+                    $drv = @(Get-PrinterDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $cand }) | Select-Object -First 1
+                    if ($drv) { break }
+                }
+            }
+            if ($drv) {
+                Add-Printer -Name $PrinterQueue -DriverName $drv.Name -PortName $ppName
+                Write-Host "  installed '$PrinterQueue' on $PrinterIP (driver: $($drv.Name))." -ForegroundColor Green
+            } else {
+                Write-Host "  NO matching driver found - install the printer's driver first, then re-run with -PrinterIP." -ForegroundColor Red
+            }
+        }
+    } catch { Write-Host "  printer install error: $($_.Exception.Message)" -ForegroundColor Red }
+}
+
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
 Slog "Editing the kiosk user hive: policies + launcher shell + writing launcher scripts..." "Cyan"
 $line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
@@ -473,6 +505,11 @@ if ($LASTEXITCODE -ne 0) {
         # hide Edge's built-in "Save as PDF" print destination - on a kiosk it silently "prints"
         # nothing physical and never reaches the print gate. Real printers are unaffected.
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /v 1 /t REG_SZ /d "pdf" /f | Out-Null
+        # make the real printer the kiosk user's default and stop Windows moving the default around
+        if ($PrinterIP -ne '') {
+            reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v LegacyDefaultPrinterMode /t REG_DWORD /d 1 /f | Out-Null
+            reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v Device /t REG_SZ /d "$PrinterQueue,winspool,IP_$PrinterIP" /f | Out-Null
+        }
         # Chrome URL filtering (Chrome is also BLOCKED from running; this blocks the web if it ever launches).
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 2 /t REG_SZ /d "https://*" /f | Out-Null
@@ -1252,9 +1289,12 @@ function Show-PrintDialog($doc, $pages, $rate, $cur) {
     $cChip  = [System.Drawing.Color]::FromArgb(13,24,43)
 
     $f = New-Object System.Windows.Forms.Form
-    $f.FormBorderStyle = "None"; $f.StartPosition = "CenterScreen"
+    $f.FormBorderStyle = "None"; $f.StartPosition = "Manual"
     $f.ClientSize = New-Object System.Drawing.Size(440, 486)
     $f.BackColor = [System.Drawing.Color]::FromArgb(17,28,49); $f.TopMost = $true
+    # bottom-right corner, just above the taskbar, and force it in front of everything
+    $f.Location = New-Object System.Drawing.Point(($scr.Width - $f.Width - 16), ($scr.Height - $barH - $f.Height - 16))
+    $f.Add_Shown({ param($snd,$e); $snd.TopMost = $true; $snd.Activate(); $snd.BringToFront() })
     $formPath = Get-RoundPath $f.ClientSize.Width $f.ClientSize.Height 16
     $f.Region = New-Object System.Drawing.Region($formPath)
     $f.Add_Paint({ param($s,$e); $e.Graphics.SmoothingMode = "AntiAlias"; $pen = New-Object System.Drawing.Pen($cLine, 1.5); $e.Graphics.DrawPath($pen, $formPath); $pen.Dispose() }.GetNewClosure())
