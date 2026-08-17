@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.16'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '1.3.17'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1038,19 +1038,113 @@ $dumpTmr = New-Object System.Windows.Forms.Timer
 $dumpTmr.Interval = 8000
 $dumpTmr.Add_Tick({ try { Log "=== startup window dump (proc + title of every visible window) ==="; Dump-AllWindows } catch {}; $this.Stop(); $this.Dispose() })
 $dumpTmr.Start()
-# --- print gate: hold each spooled print job, confirm (document + page count + cost), then release or cancel ---
+# --- rounded-rectangle path helper (dialog corners + the pages pill) ---
+function Get-RoundPath($w, $h, $r) {
+  $d = $r * 2
+  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $p.AddArc(0, 0, $d, $d, 180, 90)
+  $p.AddArc(($w - $d - 1), 0, $d, $d, 270, 90)
+  $p.AddArc(($w - $d - 1), ($h - $d - 1), $d, $d, 0, 90)
+  $p.AddArc(0, ($h - $d - 1), $d, $d, 90, 90)
+  $p.CloseFigure()
+  return $p
+}
+
+# --- custom print-confirm dialog (Option E: big + simple, price promoted, bilingual) ---
+function Show-PrintDialog($doc, $pages, $rate, $cur) {
+  $ok = $true
+  try {
+    $rateTxt = '{0:N2}' -f $rate
+    if ([int]$pages -gt 0) {
+      $priceTxt = "$cur" + ('{0:N2}' -f ($pages * $rate)); $chipTxt = "$pages pages"; $calcTxt = "$pages x $cur$rateTxt"
+    } else { $priceTxt = "$cur--"; $chipTxt = "page count unknown"; $calcTxt = "page count not available" }
+    $cLine  = [System.Drawing.Color]::FromArgb(42,59,88)
+    $cInk   = [System.Drawing.Color]::FromArgb(233,237,246)
+    $cMuted = [System.Drawing.Color]::FromArgb(147,163,184)
+    $cFaint = [System.Drawing.Color]::FromArgb(100,116,139)
+    $cAcc   = [System.Drawing.Color]::FromArgb(159,195,255)
+    $cGreen = [System.Drawing.Color]::FromArgb(126,230,163)
+    $cChip  = [System.Drawing.Color]::FromArgb(13,24,43)
+
+    $f = New-Object System.Windows.Forms.Form
+    $f.FormBorderStyle = "None"; $f.StartPosition = "CenterScreen"
+    $f.ClientSize = New-Object System.Drawing.Size(440, 486)
+    $f.BackColor = [System.Drawing.Color]::FromArgb(17,28,49); $f.TopMost = $true
+    $formPath = Get-RoundPath $f.ClientSize.Width $f.ClientSize.Height 16
+    $f.Region = New-Object System.Drawing.Region($formPath)
+    $f.Add_Paint({ param($s,$e); $e.Graphics.SmoothingMode = "AntiAlias"; $pen = New-Object System.Drawing.Pen($cLine, 1.5); $e.Graphics.DrawPath($pen, $formPath); $pen.Dispose() }.GetNewClosure())
+
+    $ic = New-Object System.Windows.Forms.Panel
+    $ic.SetBounds(191, 26, 58, 58); $ic.BackColor = [System.Drawing.Color]::FromArgb(18,50,94)
+    $ic.Region = New-Object System.Drawing.Region((Get-RoundPath 58 58 14))
+    $ic.Add_Paint({ param($s,$e); $g = $e.Graphics; $g.SmoothingMode = "AntiAlias"; $pen = New-Object System.Drawing.Pen($cAcc, 2.3); $g.DrawRectangle($pen, 14, 13, 30, 11); $g.DrawRectangle($pen, 9, 23, 40, 19); $g.DrawRectangle($pen, 15, 37, 28, 14); $pen.Dispose() }.GetNewClosure())
+    $f.Controls.Add($ic)
+
+    $t = New-Object System.Windows.Forms.Label
+    $t.Text = "Print this?"; $t.ForeColor = $cInk; $t.TextAlign = "MiddleCenter"
+    $t.Font = New-Object System.Drawing.Font("Segoe UI", 23, [System.Drawing.FontStyle]::Bold); $t.SetBounds(20, 92, 400, 42); $f.Controls.Add($t)
+
+    $he = New-Object System.Windows.Forms.Label
+    $he.Text = (-join ([char]0x05DC,[char]0x05D4,[char]0x05D3,[char]0x05E4,[char]0x05D9,[char]0x05E1)) + "?"
+    $he.ForeColor = $cMuted; $he.RightToLeft = "Yes"; $he.TextAlign = "MiddleCenter"
+    $he.Font = New-Object System.Drawing.Font("Segoe UI", 13.5); $he.SetBounds(20, 136, 400, 24); $f.Controls.Add($he)
+
+    $sub = New-Object System.Windows.Forms.Label
+    $sub.Text = "The job is waiting at the printer."; $sub.ForeColor = $cMuted; $sub.TextAlign = "MiddleCenter"
+    $sub.Font = New-Object System.Drawing.Font("Segoe UI", 10.5); $sub.SetBounds(20, 163, 400, 22); $f.Controls.Add($sub)
+
+    $dl = New-Object System.Windows.Forms.Label
+    $dl.Text = "$doc"; $dl.ForeColor = [System.Drawing.Color]::FromArgb(205,217,236); $dl.TextAlign = "MiddleCenter"
+    $dl.Font = New-Object System.Drawing.Font("Segoe UI", 10.5); $dl.SetBounds(30, 190, 380, 40); $f.Controls.Add($dl)
+
+    $pr = New-Object System.Windows.Forms.Label
+    $pr.Text = "$priceTxt"; $pr.ForeColor = $cGreen; $pr.TextAlign = "MiddleCenter"
+    $pr.Font = New-Object System.Drawing.Font("Segoe UI", 40, [System.Drawing.FontStyle]::Bold); $pr.SetBounds(20, 232, 400, 66); $f.Controls.Add($pr)
+
+    $chip = New-Object System.Windows.Forms.Panel
+    $chip.SetBounds(150, 306, 140, 30); $chip.BackColor = $cChip
+    $chip.Region = New-Object System.Drawing.Region((Get-RoundPath 140 30 15))
+    $cl = New-Object System.Windows.Forms.Label; $cl.Dock = "Fill"; $cl.Text = "$chipTxt"
+    $cl.ForeColor = [System.Drawing.Color]::FromArgb(205,217,236); $cl.TextAlign = "MiddleCenter"
+    $cl.Font = New-Object System.Drawing.Font("Segoe UI", 10); $chip.Controls.Add($cl); $f.Controls.Add($chip)
+
+    $cc = New-Object System.Windows.Forms.Label
+    $cc.Text = "$calcTxt"; $cc.ForeColor = $cFaint; $cc.TextAlign = "MiddleCenter"
+    $cc.Font = New-Object System.Drawing.Font("Segoe UI", 9); $cc.SetBounds(20, 342, 400, 18); $f.Controls.Add($cc)
+
+    $no = New-Object System.Windows.Forms.Button
+    $no.Text = "No"; $no.SetBounds(40, 376, 150, 56); $no.FlatStyle = "Flat"; $no.FlatAppearance.BorderSize = 0
+    $no.BackColor = [System.Drawing.Color]::FromArgb(36,49,74); $no.ForeColor = $cInk; $no.Cursor = "Hand"
+    $no.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $no.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $f.Controls.Add($no)
+
+    $yes = New-Object System.Windows.Forms.Button
+    $yes.Text = "Yes, print"; $yes.SetBounds(200, 376, 200, 56); $yes.FlatStyle = "Flat"; $yes.FlatAppearance.BorderSize = 0
+    $yes.BackColor = [System.Drawing.Color]::FromArgb(34,197,94); $yes.ForeColor = [System.Drawing.Color]::FromArgb(4,36,15); $yes.Cursor = "Hand"
+    $yes.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $yes.DialogResult = [System.Windows.Forms.DialogResult]::OK; $f.Controls.Add($yes)
+
+    $f.AcceptButton = $yes; $f.CancelButton = $no
+    $dr = $f.ShowDialog(); $f.Dispose()
+    $ok = ($dr -eq [System.Windows.Forms.DialogResult]::OK)
+  } catch { Log "print dialog err: $($_.Exception.Message)"; $ok = $true }
+  return $ok
+}
+
+# --- print gate: hold each spooled print job, confirm with the dialog, then release or delete ---
 $script:pgRate = __PGRATE__
 $script:pgCur  = '__PGCUR__'
 $script:pgOn   = __PGON__
 $script:pgSeen = @{}
 $script:pgPrinters = @()
 $script:pgRefresh = 0
+$script:pgBusy = $false
 function Get-PgPrinters { try { return @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) } catch { return @() } }
 if ($script:pgOn) {
   $script:pgPrinters = Get-PgPrinters
   $printTmr = New-Object System.Windows.Forms.Timer
   $printTmr.Interval = 350
   $printTmr.Add_Tick({
+    if ($script:pgBusy) { return }
+    $script:pgBusy = $true
     try {
       $script:pgRefresh++
       if ($script:pgRefresh -ge 40) { $script:pgRefresh = 0; $script:pgPrinters = Get-PgPrinters }
@@ -1069,17 +1163,13 @@ if ($script:pgOn) {
         }
       }
       foreach ($n in $new) {
-        if ($n.Pages -gt 0) {
-          $cost = '{0:N2}' -f ($n.Pages * $script:pgRate)
-          $rate = '{0:N2}' -f $script:pgRate
-          $line = "$($n.Pages) page(s)   -   cost: $($script:pgCur)$cost   ($($n.Pages) x $($script:pgCur)$rate)"
-        } else { $line = "page count not available yet" }
-        $ans = [System.Windows.Forms.MessageBox]::Show($bar, "Print this document?`n`n$($n.Doc)`n`n$line", "Confirm Print", "OKCancel", "Question")
-        if ($ans -eq "OK") { try { Resume-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print OK: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print resume err: $($_.Exception.Message)" } }
+        $ans = Show-PrintDialog $n.Doc $n.Pages $script:pgRate $script:pgCur
+        if ($ans) { try { Resume-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print OK: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print resume err: $($_.Exception.Message)" } }
         else { try { Remove-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print CANCELLED: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print remove err: $($_.Exception.Message)" } }
       }
       foreach ($k in @($script:pgSeen.Keys)) { if (-not $cur.ContainsKey($k)) { $script:pgSeen.Remove($k) } }
     } catch { Log "print gate err: $($_.Exception.Message)" }
+    $script:pgBusy = $false
   })
   $printTmr.Start()
   Log ("print gate ON (rate " + $script:pgCur + ('{0:N2}' -f $script:pgRate) + "/page)")
