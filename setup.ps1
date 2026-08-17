@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.8'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.9'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -374,9 +374,11 @@ if ($Undo) {
 }
 Write-Host "  lock-screen network UI $(if($Undo){'restored'}else{'hidden'}); Spooler running; printer add/remove locked (print-only)." -ForegroundColor Green
 
-# ---------------- 3b. optional: install a real network printer (-PrinterIP) ----------------
-# Kiosk PCs often only have "Microsoft Print to PDF", so Edge's preview shows "0 pages" and
-# nothing physical can print. Pass -PrinterIP once to install the shul printer machine-wide.
+# ---------------- 3b. real printer: auto-detect (USB etc.); -PrinterIP only for network ----------------
+# Kiosk PCs often default to "Microsoft Print to PDF", so Edge's preview shows "0 pages" and
+# nothing physical prints. A USB/networked printer already installed on the machine is detected
+# AUTOMATICALLY below and made the kiosk user's default - no parameters needed. Pass -PrinterIP
+# only to install a NETWORK printer that is not on the machine yet.
 if (-not $Undo -and $PrinterIP -ne '') {
     Slog "Installing network printer '$PrinterQueue' at $PrinterIP ..." "Cyan"
     try {
@@ -452,6 +454,7 @@ if ($LASTEXITCODE -ne 0) {
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLBlocklist" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\URLAllowlist" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /f 2>$null | Out-Null
+        reg delete "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v LegacyDefaultPrinterMode /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /f 2>$null | Out-Null
         reg delete $exp   /v HideSCANetwork             /f 2>$null | Out-Null
         reg delete $net   /v NC_LanChangeProperties     /f 2>$null | Out-Null
@@ -514,10 +517,25 @@ if ($LASTEXITCODE -ne 0) {
         # hide Edge's built-in "Save as PDF" print destination - on a kiosk it silently "prints"
         # nothing physical and never reaches the print gate. Real printers are unaffected.
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /v 1 /t REG_SZ /d "pdf" /f | Out-Null
-        # make the real printer the kiosk user's default and stop Windows moving the default around
-        if ($PrinterIP -ne '') {
+        # make the machine's REAL printer (USB or network - auto-detected, no parameters) the
+        # kiosk user's default, and stop Windows moving the default around. Virtual queues
+        # (Print to PDF / OneNote / XPS / fax / PDF converters) are skipped.
+        $physPrn = $null
+        try {
+            $allPrn = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+                $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
+                $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)'
+            })
+            # prefer the -PrinterIP-installed queue when given; otherwise the first physical one
+            $physPrn = $allPrn | Where-Object { $_.Name -eq $PrinterQueue } | Select-Object -First 1
+            if (-not $physPrn) { $physPrn = $allPrn | Select-Object -First 1 }
+        } catch {}
+        if ($physPrn) {
             reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v LegacyDefaultPrinterMode /t REG_DWORD /d 1 /f | Out-Null
-            reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v Device /t REG_SZ /d "$PrinterQueue,winspool,IP_$PrinterIP" /f | Out-Null
+            reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v Device /t REG_SZ /d "$($physPrn.Name),winspool,$($physPrn.PortName)" /f | Out-Null
+            Write-Host "  kiosk default printer -> '$($physPrn.Name)' (port $($physPrn.PortName))" -ForegroundColor Green
+        } else {
+            Write-Host "  NO real printer found on this machine (only virtual queues) - plug in / install the printer and re-run setup." -ForegroundColor Yellow
         }
         # Chrome URL filtering (Chrome is also BLOCKED from running; this blocks the web if it ever launches).
         reg add "HKU\LockAll\Software\Policies\Google\Chrome\URLBlocklist" /v 1 /t REG_SZ /d "http://*"  /f | Out-Null
