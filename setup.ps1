@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '1.3.17'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -827,6 +827,25 @@ function Show-TilePopup($tile) {
 # collection of bar tiles (tile -> its badge label) for the count timer
 $script:barTiles = New-Object System.Collections.ArrayList
 
+# --- shared launch/reshow: focus the app if a window is already open, else start it.
+# Returns $true if it LAUNCHED a new process (caller may show a brief "Opening..." state),
+# $false if it just reshowed an already-open window. Used by BOTH the bar tiles and the desktop cards.
+function Invoke-Launch($exe, $tileArgs, $procMatch, $titleMatch) {
+  $wins = @()
+  try { $wins = Get-AppWindows $procMatch $titleMatch } catch { Log "launch enum err: $($_.Exception.Message)" }
+  if (@($wins).Count -ge 1) {
+    try { Show-Window $wins[0].Hwnd; Log "reshown: $exe" } catch { Log "reshow err: $($_.Exception.Message)" }
+    return $false
+  }
+  try {
+    if (-not (Test-Path -LiteralPath $exe)) { Log "MISSING exe: $exe"; return $false }
+    if ($tileArgs) { Start-Process -FilePath $exe -ArgumentList $tileArgs -ErrorAction Stop }
+    else           { Start-Process -FilePath $exe -ErrorAction Stop }
+    Log "launched: $exe $tileArgs"
+  } catch { Log "FAILED: $exe -> $($_.Exception.Message)" }
+  return $true
+}
+
 function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titleMatch) {
   $b = New-Object System.Windows.Forms.Button
   $b.Text = $text; $b.SetBounds($x, $y, $w, $h)
@@ -838,21 +857,10 @@ function New-Tile($text, $exe, $x, $y, $w, $h, $fs, $tileArgs, $procMatch, $titl
   $b.Add_Click({
     $t = $this.Tag
     $btn = $this; $orig = $btn.Text
-    # count open windows: >=1 -> focus first (instant, no grey-out); 0 -> launch (grey-out)
-    $wins = @()
-    try { $wins = Get-AppWindows $t.Proc $t.Title } catch { Log "click enum err: $($_.Exception.Message)" }
-    if ($wins.Count -ge 1) {
-      try { Show-Window $wins[0].Hwnd; Log "reshown: $($t.Exe) ($text)" } catch { Log "reshow err: $($_.Exception.Message)" }
-      return
-    }
-    # no open window -> launch it, with a brief "Opening..." grey-out so people don't rapid-fire click
+    # >=1 open window -> focus first (instant, no grey-out); 0 -> launch (grey-out). Shared with the cards.
+    if (-not (Invoke-Launch $t.Exe $t.Args $t.Proc $t.Title)) { return }
+    # no open window -> we launched: brief "Opening..." grey-out so people don't rapid-fire click
     $btn.Enabled = $false; $btn.Text = "Opening..."
-    try {
-      if (-not (Test-Path -LiteralPath $t.Exe)) { Log "MISSING exe: $($t.Exe)"; $btn.Enabled = $true; $btn.Text = $orig; return }
-      if ($t.Args) { Start-Process -FilePath $t.Exe -ArgumentList $t.Args -ErrorAction Stop }
-      else         { Start-Process -FilePath $t.Exe -ErrorAction Stop }
-      Log "launched: $($t.Exe) $($t.Args)"
-    } catch { Log "FAILED: $($t.Exe) -> $($_.Exception.Message)" }
     $tmr = New-Object System.Windows.Forms.Timer
     $tmr.Interval = 4000
     $tmr.Tag = @{ B = $btn; T = $orig }
@@ -926,29 +934,214 @@ function Toggle-Lang {
   } catch { Log "toggle-lang failed: $($_.Exception.Message)" }
 }
 
-# full-screen launcher "desktop" (visible when no app is open)
+# --- rounded-rectangle path helper (dialog corners, the pages pill, the desktop cards + badges) ---
+function Get-RoundPath($w, $h, $r) {
+  $d = $r * 2
+  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $p.AddArc(0, 0, $d, $d, 180, 90)
+  $p.AddArc(($w - $d - 1), 0, $d, $d, 270, 90)
+  $p.AddArc(($w - $d - 1), ($h - $d - 1), $d, $d, 0, 90)
+  $p.AddArc(0, ($h - $d - 1), $d, $d, 90, 90)
+  $p.CloseFigure()
+  return $p
+}
+
+# --- faux letter-spacing: a single space between characters, a wider gap between words ---
+function Space-Out($s) {
+  $words = $s.Split(' ')
+  $out = @()
+  foreach ($wd in $words) { $out += ($wd.ToCharArray() -join ' ') }
+  return ($out -join '   ')
+}
+
+# --- a rounded, tinted icon badge with a simple GDI line icon drawn in the accent color ---
+# $kind = "book" (Otzar) | "doc" (LibreOffice) | "pdf" (PDF Files)
+function New-Badge($size, $bgTint, $accent, $kind) {
+  $bd = New-Object System.Windows.Forms.Panel
+  $bd.Size = New-Object System.Drawing.Size($size, $size)
+  $bd.BackColor = $bgTint
+  $bd.Region = New-Object System.Drawing.Region((Get-RoundPath $size $size 14))
+  $ac = $accent; $kd = $kind; $sz = $size
+  $bd.Add_Paint({
+    param($snd, $e)
+    $g = $e.Graphics; $g.SmoothingMode = "AntiAlias"
+    $pen = New-Object System.Drawing.Pen($ac, 2)
+    $L = [int]($sz * 0.30); $T = [int]($sz * 0.24); $R = [int]($sz * 0.70); $B = [int]($sz * 0.76)
+    if ($kd -eq "book") {
+      # book outline: cover rectangle + centre spine + 2 short page lines
+      $g.DrawRectangle($pen, $L, $T, ($R - $L), ($B - $T))
+      $mid = [int](($L + $R) / 2)
+      $g.DrawLine($pen, $mid, $T, $mid, $B)
+      $qx1 = $mid + [int]($sz * 0.05); $qx2 = $R - [int]($sz * 0.05)
+      $g.DrawLine($pen, $qx1, [int]($T + ($B - $T) * 0.35), $qx2, [int]($T + ($B - $T) * 0.35))
+      $g.DrawLine($pen, $qx1, [int]($T + ($B - $T) * 0.62), $qx2, [int]($T + ($B - $T) * 0.62))
+    } else {
+      # page with a folded top-right corner (doc + pdf share this)
+      $fold = [int]($sz * 0.13)
+      $pts = @(
+        (New-Object System.Drawing.Point($L, $T)),
+        (New-Object System.Drawing.Point(($R - $fold), $T)),
+        (New-Object System.Drawing.Point($R, ($T + $fold))),
+        (New-Object System.Drawing.Point($R, $B)),
+        (New-Object System.Drawing.Point($L, $B))
+      )
+      $g.DrawPolygon($pen, [System.Drawing.Point[]]$pts)
+      $g.DrawLine($pen, ($R - $fold), $T, ($R - $fold), ($T + $fold))
+      $g.DrawLine($pen, ($R - $fold), ($T + $fold), $R, ($T + $fold))
+      if ($kd -eq "pdf") {
+        # a small "P" mark inside the page
+        $br = New-Object System.Drawing.SolidBrush($ac)
+        $pf = New-Object System.Drawing.Font("Segoe UI", [float]($sz * 0.20), [System.Drawing.FontStyle]::Bold)
+        $g.DrawString("P", $pf, $br, [float]($L + $sz * 0.03), [float]($T + $sz * 0.26))
+        $pf.Dispose(); $br.Dispose()
+      } else {
+        # doc: 2 horizontal text lines
+        $lx1 = $L + [int]($sz * 0.06); $lx2 = $R - [int]($sz * 0.06)
+        $g.DrawLine($pen, $lx1, [int]($T + ($B - $T) * 0.55), $lx2, [int]($T + ($B - $T) * 0.55))
+        $g.DrawLine($pen, $lx1, [int]($T + ($B - $T) * 0.75), $lx2, [int]($T + ($B - $T) * 0.75))
+      }
+    }
+    $pen.Dispose()
+  }.GetNewClosure())
+  return $bd
+}
+
+# --- a rounded white desktop card whose WHOLE surface launches/reshows its app via Invoke-Launch ---
+function New-CardBase($w, $h, $borderCol, $exe, $tileArgs, $procMatch, $titleMatch) {
+  $card = New-Object System.Windows.Forms.Panel
+  $card.Size = New-Object System.Drawing.Size($w, $h)
+  $card.BackColor = [System.Drawing.Color]::FromArgb(255, 253, 248)
+  $card.Region = New-Object System.Drawing.Region((Get-RoundPath $w $h 16))
+  $bc = $borderCol
+  $card.Add_Paint({ param($snd, $e); $e.Graphics.SmoothingMode = "AntiAlias"; $pen = New-Object System.Drawing.Pen($bc, 1); $gp = Get-RoundPath $snd.Width $snd.Height 16; $e.Graphics.DrawPath($pen, $gp); $pen.Dispose(); $gp.Dispose() }.GetNewClosure())
+  $card.Cursor = "Hand"
+  # capture the per-card launch values into locals; the handler never reads $this.Tag
+  $cExe = $exe; $cArgs = $tileArgs; $cProc = $procMatch; $cTitle = $titleMatch
+  $clk = { Invoke-Launch $cExe $cArgs $cProc $cTitle }.GetNewClosure()
+  $card.Add_Click($clk)
+  $card.Tag = $clk   # child controls reuse the same closure so a click anywhere on the card launches
+  return $card
+}
+
+# full-screen launcher "desktop" (visible when no app is open) - light "daylight" Option 1 shell
 $bg = New-Object System.Windows.Forms.Form
 $bg.FormBorderStyle = "None"; $bg.StartPosition = "Manual"
 $bg.Bounds = New-Object System.Drawing.Rectangle(0, 0, $scr.Width, ($scr.Height - $barH))
-$bg.BackColor = $colBg
+$bg.BackColor = [System.Drawing.Color]::FromArgb(251, 247, 238)
 $bg.Add_FormClosing({ if ($args[1].CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) { $args[1].Cancel = $true } })
-$title = New-Object System.Windows.Forms.Label
-$title.Text = "Otzar Hachochma"; $title.ForeColor = [System.Drawing.Color]::White
-$title.Font = New-Object System.Drawing.Font("Segoe UI Light", 42)
-$title.TextAlign = "MiddleCenter"; $title.SetBounds(0, 80, $scr.Width, 100)
-$bg.Controls.Add($title)
-$tw = 300; $th = 190; $gap = 44
-$sx = [int](($scr.Width - ($tw * 3 + $gap * 2)) / 2)
-$ty = [int](($scr.Height - $barH) / 2 - $th / 2 + 30)
-$bg.Controls.Add((New-Tile "Otzar Hachochma" "__OTZAR__" $sx $ty $tw $th 22 $null "(?i)otzar" $null))
-$bg.Controls.Add((New-Tile "LibreOffice" "__LIBRE__" ($sx + $tw + $gap) $ty $tw $th 22 $null "(?i)soffice|libreoffice" $null))
-$bg.Controls.Add((New-Tile "PDF Files" "__PDF__" ($sx + ($tw + $gap) * 2) $ty $tw $th 22 "__PDFARGS__" $null "PDF Files"))
-$cred = New-Object System.Windows.Forms.Label
-$cred.Text = "Built by Shalom Karr (216) 451-6698"
-$cred.ForeColor = [System.Drawing.Color]::FromArgb(120,140,170)
-$cred.Font = New-Object System.Drawing.Font("Segoe UI", 11)
-$cred.TextAlign = "MiddleCenter"; $cred.SetBounds(0, ($scr.Height - $barH - 60), $scr.Width, 30)
-$bg.Controls.Add($cred)
+# soft warm vertical gradient over the whole desktop (top #fbf7ee -> bottom #ece5d5)
+$dw = $scr.Width; $dh = $scr.Height - $barH
+$gradTop = [System.Drawing.Color]::FromArgb(251, 247, 238)
+$gradBot = [System.Drawing.Color]::FromArgb(236, 229, 213)
+$bg.Add_Paint({
+  param($snd, $e)
+  $rc = New-Object System.Drawing.Rectangle(0, 0, $dw, $dh)
+  $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rc, $gradTop, $gradBot, 90)
+  $e.Graphics.FillRectangle($lg, $rc)
+  $lg.Dispose()
+}.GetNewClosure())
+
+# ---- centered branding lockup (eyebrow / serif title / Desktop Filter pill) ----
+$eyebrow = New-Object System.Windows.Forms.Label
+$eyebrow.Text = (Space-Out "SHALOM KARR'S WINDOWS")
+$eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(162, 145, 111)
+$eyebrow.BackColor = [System.Drawing.Color]::Transparent
+$eyebrow.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 13)
+$eyebrow.TextAlign = "MiddleCenter"; $eyebrow.SetBounds(0, 58, $dw, 28)
+$bg.Controls.Add($eyebrow)
+
+$brandTitle = New-Object System.Windows.Forms.Label
+$brandTitle.Text = "Otzar Hachochma"
+$brandTitle.ForeColor = [System.Drawing.Color]::FromArgb(34, 48, 63)
+$brandTitle.BackColor = [System.Drawing.Color]::Transparent
+$brandTitle.Font = New-Object System.Drawing.Font("Times New Roman", 40, [System.Drawing.FontStyle]::Bold)
+$brandTitle.TextAlign = "MiddleCenter"; $brandTitle.SetBounds(0, 92, $dw, 80)
+$bg.Controls.Add($brandTitle)
+
+$pillW = 220; $pillH = 38
+$pill = New-Object System.Windows.Forms.Panel
+$pill.SetBounds([int](($dw - $pillW) / 2), 182, $pillW, $pillH)
+$pill.BackColor = [System.Drawing.Color]::FromArgb(255, 253, 248)
+$pill.Region = New-Object System.Drawing.Region((Get-RoundPath $pillW $pillH ([int]($pillH / 2))))
+$pillBorder = [System.Drawing.Color]::FromArgb(221, 211, 189)
+$pill.Add_Paint({ param($snd, $e); $e.Graphics.SmoothingMode = "AntiAlias"; $pen = New-Object System.Drawing.Pen($pillBorder, 1); $gp = Get-RoundPath $snd.Width $snd.Height ([int]($snd.Height / 2)); $e.Graphics.DrawPath($pen, $gp); $pen.Dispose(); $gp.Dispose() }.GetNewClosure())
+$pillLbl = New-Object System.Windows.Forms.Label
+$pillLbl.Dock = "Fill"; $pillLbl.Text = (Space-Out "DESKTOP FILTER")
+$pillLbl.ForeColor = [System.Drawing.Color]::FromArgb(122, 106, 78)
+$pillLbl.BackColor = [System.Drawing.Color]::FromArgb(255, 253, 248)
+$pillLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
+$pillLbl.TextAlign = "MiddleCenter"
+$pill.Controls.Add($pillLbl)
+$bg.Controls.Add($pill)
+
+# ---- Hebrew strings (built from char codes so the source stays ASCII) ----
+$hebOtzar = -join ([char]0x05D0,[char]0x05D5,[char]0x05E6,[char]0x05E8,[char]0x0020,[char]0x05D4,[char]0x05D7,[char]0x05DB,[char]0x05DE,[char]0x05D4)
+$hebLibre = -join ([char]0x05DE,[char]0x05E2,[char]0x05D1,[char]0x05D3,[char]0x0020,[char]0x05EA,[char]0x05DE,[char]0x05DC,[char]0x05D9,[char]0x05DC,[char]0x05D9,[char]0x05DD)
+$hebPdf   = (-join ([char]0x05E7,[char]0x05D1,[char]0x05E6,[char]0x05D9,[char]0x0020)) + "PDF"
+
+# ---- three app cards: LibreOffice (green) | Otzar (blue HERO) | PDF Files (red) ----
+$sideW = 260; $sideH = 300; $heroW = 320; $heroH = 360; $cgap = 34
+$rowW = $sideW * 2 + $heroW + $cgap * 2
+$rowX = [int](($dw - $rowW) / 2)
+$bandTop = 240; $bandBot = $dh - 40
+$heroY = [int]($bandTop + ($bandBot - $bandTop - $heroH) / 2)
+if ($heroY -lt $bandTop) { $heroY = $bandTop }
+$sideY = [int]($heroY + ($heroH - $sideH) / 2)
+$nameCol = [System.Drawing.Color]::FromArgb(58, 74, 88)
+$subCol  = [System.Drawing.Color]::FromArgb(122, 106, 78)
+$heroInk = [System.Drawing.Color]::FromArgb(34, 48, 63)
+$cardBg  = [System.Drawing.Color]::FromArgb(255, 253, 248)
+
+# LEFT: LibreOffice (green)
+$cardLibre = New-CardBase $sideW $sideH ([System.Drawing.Color]::FromArgb(222, 214, 196)) "__LIBRE__" $null "(?i)soffice|libreoffice" $null
+$cardLibre.Location = New-Object System.Drawing.Point($rowX, $sideY)
+$bLibre = New-Badge 58 ([System.Drawing.Color]::FromArgb(230,246,236)) ([System.Drawing.Color]::FromArgb(31,157,85)) "doc"
+$bLibre.Location = New-Object System.Drawing.Point([int](($sideW - 58) / 2), 48)
+$cardLibre.Controls.Add($bLibre)
+$nLibre = New-Object System.Windows.Forms.Label
+$nLibre.Text = "LibreOffice"; $nLibre.ForeColor = $nameCol; $nLibre.BackColor = $cardBg
+$nLibre.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $nLibre.TextAlign = "MiddleCenter"
+$nLibre.SetBounds(10, 138, ($sideW - 20), 34); $cardLibre.Controls.Add($nLibre)
+$sLibre = New-Object System.Windows.Forms.Label
+$sLibre.Text = $hebLibre; $sLibre.ForeColor = $subCol; $sLibre.BackColor = $cardBg
+$sLibre.RightToLeft = "Yes"; $sLibre.Font = New-Object System.Drawing.Font("Times New Roman", 15); $sLibre.TextAlign = "MiddleCenter"
+$sLibre.SetBounds(10, 176, ($sideW - 20), 30); $cardLibre.Controls.Add($sLibre)
+foreach ($ch in @($bLibre, $nLibre, $sLibre)) { $ch.Cursor = "Hand"; $ch.Add_Click($cardLibre.Tag) }
+$bg.Controls.Add($cardLibre)
+
+# CENTER: Otzar Hachochma (blue HERO - larger, blue-ish border)
+$cardOtzar = New-CardBase $heroW $heroH ([System.Drawing.Color]::FromArgb(201, 216, 240)) "__OTZAR__" $null "(?i)otzar" $null
+$cardOtzar.Location = New-Object System.Drawing.Point(($rowX + $sideW + $cgap), $heroY)
+$bOtzar = New-Badge 84 ([System.Drawing.Color]::FromArgb(230,239,255)) ([System.Drawing.Color]::FromArgb(47,111,224)) "book"
+$bOtzar.Location = New-Object System.Drawing.Point([int](($heroW - 84) / 2), 56)
+$cardOtzar.Controls.Add($bOtzar)
+$nOtzar = New-Object System.Windows.Forms.Label
+$nOtzar.Text = $hebOtzar; $nOtzar.ForeColor = $heroInk; $nOtzar.BackColor = $cardBg
+$nOtzar.RightToLeft = "Yes"; $nOtzar.Font = New-Object System.Drawing.Font("Times New Roman", 26, [System.Drawing.FontStyle]::Bold); $nOtzar.TextAlign = "MiddleCenter"
+$nOtzar.SetBounds(12, 176, ($heroW - 24), 60); $cardOtzar.Controls.Add($nOtzar)
+$sOtzar = New-Object System.Windows.Forms.Label
+$sOtzar.Text = "Otzar Hachochma"; $sOtzar.ForeColor = $subCol; $sOtzar.BackColor = $cardBg
+$sOtzar.Font = New-Object System.Drawing.Font("Segoe UI", 11); $sOtzar.TextAlign = "MiddleCenter"
+$sOtzar.SetBounds(12, 240, ($heroW - 24), 26); $cardOtzar.Controls.Add($sOtzar)
+foreach ($ch in @($bOtzar, $nOtzar, $sOtzar)) { $ch.Cursor = "Hand"; $ch.Add_Click($cardOtzar.Tag) }
+$bg.Controls.Add($cardOtzar)
+
+# RIGHT: PDF Files (red)
+$cardPdf = New-CardBase $sideW $sideH ([System.Drawing.Color]::FromArgb(222, 214, 196)) "__PDF__" "__PDFARGS__" $null "PDF Files"
+$cardPdf.Location = New-Object System.Drawing.Point(($rowX + $sideW + $cgap + $heroW + $cgap), $sideY)
+$bPdf = New-Badge 58 ([System.Drawing.Color]::FromArgb(253,236,236)) ([System.Drawing.Color]::FromArgb(214,69,69)) "pdf"
+$bPdf.Location = New-Object System.Drawing.Point([int](($sideW - 58) / 2), 48)
+$cardPdf.Controls.Add($bPdf)
+$nPdf = New-Object System.Windows.Forms.Label
+$nPdf.Text = "PDF Files"; $nPdf.ForeColor = $nameCol; $nPdf.BackColor = $cardBg
+$nPdf.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $nPdf.TextAlign = "MiddleCenter"
+$nPdf.SetBounds(10, 138, ($sideW - 20), 34); $cardPdf.Controls.Add($nPdf)
+$sPdf = New-Object System.Windows.Forms.Label
+$sPdf.Text = $hebPdf; $sPdf.ForeColor = $subCol; $sPdf.BackColor = $cardBg
+$sPdf.RightToLeft = "Yes"; $sPdf.Font = New-Object System.Drawing.Font("Times New Roman", 15); $sPdf.TextAlign = "MiddleCenter"
+$sPdf.SetBounds(10, 176, ($sideW - 20), 30); $cardPdf.Controls.Add($sPdf)
+foreach ($ch in @($bPdf, $nPdf, $sPdf)) { $ch.Cursor = "Hand"; $ch.Add_Click($cardPdf.Tag) }
+$bg.Controls.Add($cardPdf)
 # slim always-on-top bottom bar (reachable while an app is open)
 $bar = New-Object System.Windows.Forms.Form
 $bar.FormBorderStyle = "None"; $bar.TopMost = $true; $bar.ShowInTaskbar = $false
@@ -967,7 +1160,7 @@ Register-BarTile $tileLibre $bar
 Register-BarTile $tilePdf   $bar
 # language toggle button (left of the credit label)
 $btnLang = New-Object System.Windows.Forms.Button
-$btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 530), 12, 90, 48)
+$btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 670), 12, 90, 48)
 $btnLang.FlatStyle = "Flat"; $btnLang.FlatAppearance.BorderSize = 0
 $btnLang.ForeColor = [System.Drawing.Color]::White
 $btnLang.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
@@ -981,7 +1174,7 @@ $bar.Controls.Add($btnLang)
 # Admin Login button (just before the credit) - RESTARTS the PC (with a confirm) so you land on the login
 # screen and can log in as admin (khaly). Lock/Win+L and Sign-out are disabled, so restart is the way in.
 $btnAdmin = New-Object System.Windows.Forms.Button
-$btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 430), 12, 150, 48)
+$btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 570), 12, 150, 48)
 $btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
 $btnAdmin.ForeColor = [System.Drawing.Color]::White
 $btnAdmin.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
@@ -1000,8 +1193,8 @@ $bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
 $barCred.Text = "Built by Shalom Karr (216) 451-6698"
 $barCred.ForeColor = [System.Drawing.Color]::FromArgb(150,165,190)
-$barCred.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 270), 20, 250, 30)
+$barCred.Font = New-Object System.Drawing.Font("Segoe UI", 16)
+$barCred.TextAlign = "MiddleRight"; $barCred.SetBounds(($scr.Width - 400), 15, 390, 42)
 $barCred.Anchor = "Top,Right"
 $bar.Controls.Add($barCred)
 # ~1s timer to keep the language label in sync with the focused app
@@ -1038,18 +1231,6 @@ $dumpTmr = New-Object System.Windows.Forms.Timer
 $dumpTmr.Interval = 8000
 $dumpTmr.Add_Tick({ try { Log "=== startup window dump (proc + title of every visible window) ==="; Dump-AllWindows } catch {}; $this.Stop(); $this.Dispose() })
 $dumpTmr.Start()
-# --- rounded-rectangle path helper (dialog corners + the pages pill) ---
-function Get-RoundPath($w, $h, $r) {
-  $d = $r * 2
-  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $p.AddArc(0, 0, $d, $d, 180, 90)
-  $p.AddArc(($w - $d - 1), 0, $d, $d, 270, 90)
-  $p.AddArc(($w - $d - 1), ($h - $d - 1), $d, $d, 0, 90)
-  $p.AddArc(0, ($h - $d - 1), $d, $d, 90, 90)
-  $p.CloseFigure()
-  return $p
-}
-
 # --- custom print-confirm dialog (Option E: big + simple, price promoted, bilingual) ---
 function Show-PrintDialog($doc, $pages, $rate, $cur) {
   $ok = $true
