@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1399,19 +1399,46 @@ $roots = @(
   @{ Name = "Downloads"; Path = $dl }
 )
 
-$colBg     = [System.Drawing.Color]::FromArgb(15,23,42)
-$colCard   = [System.Drawing.Color]::FromArgb(30,41,59)
-$colHover  = [System.Drawing.Color]::FromArgb(51,65,85)
-$colWhite  = [System.Drawing.Color]::White
-$colMuted  = [System.Drawing.Color]::FromArgb(148,163,184)
-$colFolder = [System.Drawing.Color]::FromArgb(250,204,21)
-$colPdf    = [System.Drawing.Color]::FromArgb(96,165,250)
-$fontName  = "Segoe UI"
+# --- light "P2" daylight palette (matches the home screen) ---
+$colWinBg   = [System.Drawing.Color]::FromArgb(244,239,227)   # #f4efe3 window bg
+$colHeader  = [System.Drawing.Color]::FromArgb(239,232,216)   # #efe8d8 header bar
+$colHdrLine = [System.Drawing.Color]::FromArgb(221,211,189)   # #ddd3bd header border
+$colRow     = [System.Drawing.Color]::FromArgb(255,253,248)   # #fffdf8 row / button bg
+$colRowBd   = [System.Drawing.Color]::FromArgb(227,220,203)   # #e3dccb row / button border
+$colHover   = [System.Drawing.Color]::FromArgb(244,239,227)   # #f4efe3 row hover
+$colInk     = [System.Drawing.Color]::FromArgb(58,74,88)      # #3a4a58 ink text
+$colMuted   = [System.Drawing.Color]::FromArgb(122,106,78)    # #7a6a4e muted
+$colClose   = [System.Drawing.Color]::FromArgb(214,69,69)     # #d64545 close
+$colCloseHi = [System.Drawing.Color]::FromArgb(224,90,90)
+# category tints: bg + accent
+$folderBg = [System.Drawing.Color]::FromArgb(246,236,212); $folderFg = [System.Drawing.Color]::FromArgb(200,144,31)
+$pdfBg    = [System.Drawing.Color]::FromArgb(253,236,236); $pdfFg    = [System.Drawing.Color]::FromArgb(214,69,69)
+$officeBg = [System.Drawing.Color]::FromArgb(230,239,255); $officeFg = [System.Drawing.Color]::FromArgb(47,111,224)
+$txtBg    = [System.Drawing.Color]::FromArgb(238,231,215); $txtFg    = [System.Drawing.Color]::FromArgb(122,106,78)
+$fontName = "Segoe UI"
 
-# find msedge.exe (app-mode viewer)
+# rounded-rectangle path helper (browserBody is a standalone script - own copy)
+function Get-RoundPath($w, $h, $r) {
+  $d = $r * 2
+  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $p.AddArc(0, 0, $d, $d, 180, 90)
+  $p.AddArc(($w - $d - 1), 0, $d, $d, 270, 90)
+  $p.AddArc(($w - $d - 1), ($h - $d - 1), $d, $d, 0, 90)
+  $p.AddArc(0, ($h - $d - 1), $d, $d, 90, 90)
+  $p.CloseFigure()
+  return $p
+}
+
+# find msedge.exe (app-mode PDF viewer)
 $script:edge = $null
 foreach ($c in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")) {
   if ($c -and (Test-Path -LiteralPath $c)) { $script:edge = $c; break }
+}
+
+# find soffice.exe (LibreOffice - opens Office docs)
+$script:soffice = $null
+foreach ($c in @("$env:ProgramFiles\LibreOffice\program\soffice.exe", "${env:ProgramFiles(x86)}\LibreOffice\program\soffice.exe")) {
+  if ($c -and (Test-Path -LiteralPath $c)) { $script:soffice = $c; break }
 }
 
 function Open-Pdf($path) {
@@ -1422,6 +1449,15 @@ function Open-Pdf($path) {
     Start-Process -FilePath $script:edge -ArgumentList ('--app=' + $uri) -ErrorAction Stop
     Log ("opened PDF (app-mode): " + $path)
   } catch { Log ("FAILED to open PDF: " + $path + " -> " + $_.Exception.Message) }
+}
+
+function Open-Office($path) {
+  try {
+    if (-not $script:soffice) { Log ("FAILED to open in LibreOffice (no soffice): " + $path); return }
+    $full = (Resolve-Path -LiteralPath $path).Path
+    Start-Process -FilePath $script:soffice -ArgumentList $full -ErrorAction Stop
+    Log ("opened in LibreOffice: " + $path)
+  } catch { Log ("FAILED to open in LibreOffice: " + $path + " -> " + $_.Exception.Message) }
 }
 
 # $null current = the two-root "home"; otherwise the full path we are inside
@@ -1441,42 +1477,55 @@ function Get-RootFor($path) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "PDF Files"
-$form.BackColor = $colBg
+$form.BackColor = $colWinBg
 $form.WindowState = "Maximized"
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = New-Object System.Drawing.Size(700, 480)
 
-# --- top header bar ---
+# --- top header bar (light) ---
 $top = New-Object System.Windows.Forms.Panel
 $top.Dock = "Top"
-$top.Height = 108
-$top.BackColor = $colCard
+$top.Height = 96
+$top.BackColor = $colHeader
 $form.Controls.Add($top)
+$top.Add_Resize({ $this.Invalidate() })
+$top.Add_Paint({
+  param($snd, $e)
+  $pen = New-Object System.Drawing.Pen($colHdrLine, 1)
+  $e.Graphics.DrawLine($pen, 0, ($snd.Height - 1), $snd.Width, ($snd.Height - 1))
+  $pen.Dispose()
+})
 
 $lblTitle = New-Object System.Windows.Forms.Label
 $lblTitle.Text = "PDF Files"
-$lblTitle.ForeColor = $colWhite
-$lblTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 20)
+$lblTitle.ForeColor = $colInk
+$lblTitle.BackColor = [System.Drawing.Color]::Transparent
+$lblTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 18)
 $lblTitle.TextAlign = "MiddleLeft"
-$lblTitle.SetBounds(24, 10, 400, 40)
+$lblTitle.AutoEllipsis = $true
+$lblTitle.SetBounds(24, 12, 700, 36)
+$lblTitle.Anchor = "Top,Left,Right"
 $top.Controls.Add($lblTitle)
 
 $btnUp = New-Object System.Windows.Forms.Button
 $btnUp.Text = "Up"
-$btnUp.SetBounds(24, 56, 120, 44)
+$btnUp.SetBounds(24, 54, 96, 34)
 $btnUp.FlatStyle = "Flat"
-$btnUp.FlatAppearance.BorderSize = 0
-$btnUp.ForeColor = $colWhite
-$btnUp.BackColor = [System.Drawing.Color]::FromArgb(30,41,59)
-$btnUp.Font = New-Object System.Drawing.Font($fontName, 13)
+$btnUp.FlatAppearance.BorderColor = $colRowBd
+$btnUp.FlatAppearance.BorderSize = 1
+$btnUp.ForeColor = $colInk
+$btnUp.BackColor = $colRow
+$btnUp.Font = New-Object System.Drawing.Font($fontName, 12)
 $btnUp.Cursor = "Hand"
 $top.Controls.Add($btnUp)
 
 $lblPath = New-Object System.Windows.Forms.Label
 $lblPath.ForeColor = $colMuted
-$lblPath.Font = New-Object System.Drawing.Font($fontName, 13)
+$lblPath.BackColor = [System.Drawing.Color]::Transparent
+$lblPath.Font = New-Object System.Drawing.Font($fontName, 12)
 $lblPath.TextAlign = "MiddleLeft"
-$lblPath.SetBounds(160, 56, 800, 44)
+$lblPath.AutoEllipsis = $true
+$lblPath.SetBounds(136, 54, 600, 34)
 $lblPath.Anchor = "Top,Left,Right"
 $top.Controls.Add($lblPath)
 
@@ -1484,71 +1533,151 @@ $btnClose = New-Object System.Windows.Forms.Button
 $btnClose.Text = "Close"
 $btnClose.FlatStyle = "Flat"
 $btnClose.FlatAppearance.BorderSize = 0
-$btnClose.ForeColor = $colWhite
-$btnClose.BackColor = [System.Drawing.Color]::FromArgb(190,60,60)
-$btnClose.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 14)
+$btnClose.ForeColor = [System.Drawing.Color]::White
+$btnClose.BackColor = $colClose
+$btnClose.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 13)
 $btnClose.Cursor = "Hand"
 $btnClose.Anchor = "Top,Right"
-$btnClose.SetBounds(($form.ClientSize.Width - 180), 30, 150, 52)
+$btnClose.SetBounds(($form.ClientSize.Width - 156), 26, 132, 44)
 $top.Controls.Add($btnClose)
 $btnClose.Add_Click({ $form.Close() })
+$btnClose.Add_MouseEnter({ $this.BackColor = $colCloseHi })
+$btnClose.Add_MouseLeave({ $this.BackColor = $colClose })
+$btnUp.Add_MouseEnter({ if ($this.Enabled) { $this.BackColor = $colHover } })
+$btnUp.Add_MouseLeave({ $this.BackColor = $colRow })
 
-# --- card area: a scrolling FlowLayoutPanel of tiles ---
+# --- list area: a vertical scrolling list of full-width rows ---
 $flow = New-Object System.Windows.Forms.FlowLayoutPanel
 $flow.Dock = "Fill"
 $flow.AutoScroll = $true
-$flow.WrapContents = $true
-$flow.FlowDirection = "LeftToRight"
-$flow.BackColor = $colBg
-$flow.Padding = New-Object System.Windows.Forms.Padding(12)
+$flow.WrapContents = $false
+$flow.FlowDirection = "TopDown"
+$flow.BackColor = $colWinBg
+$flow.Padding = New-Object System.Windows.Forms.Padding(16, 14, 16, 14)
 $form.Controls.Add($flow)
 $flow.BringToFront()
 
-function New-Card($kind, $name, $path) {
-  # $kind = "dir" or "pdf"
-  $card = New-Object System.Windows.Forms.Button
-  $card.Width = 200; $card.Height = 150
-  $card.Margin = New-Object System.Windows.Forms.Padding(12)
-  $card.FlatStyle = "Flat"
-  $card.FlatAppearance.BorderSize = 0
-  $card.BackColor = $colCard
-  $card.ForeColor = $colWhite
-  $card.Cursor = "Hand"
-  $card.TextAlign = "MiddleCenter"
-  $card.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
-  if ($kind -eq "dir") { $tag = "FOLDER"; $accent = $colFolder } else { $tag = "PDF"; $accent = $colPdf }
-  $card.Text = $name
-  $card.Tag = @{ Type = $kind; Path = $path }
+function Fit-Rows {
+  try {
+    $w = $flow.ClientSize.Width - $flow.Padding.Horizontal
+    if ($w -lt 200) { $w = 200 }
+    foreach ($c in $flow.Controls) { $c.Width = $w }
+  } catch {}
+}
+$flow.Add_SizeChanged({ Fit-Rows })
 
-  # accent label at the top of the card (FOLDER / PDF)
-  $lbl = New-Object System.Windows.Forms.Label
-  $lbl.Text = $tag
-  $lbl.ForeColor = $accent
-  $lbl.BackColor = [System.Drawing.Color]::Transparent
-  $lbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
-  $lbl.TextAlign = "MiddleCenter"
-  $lbl.SetBounds(0, 8, 200, 22)
-  $lbl.Cursor = "Hand"
-  $card.Controls.Add($lbl)
+# shared click handler (plain scriptblock, NOT a closure, so $script:current writes hit script scope)
+$rowClick = {
+  $i = $this.Tag
+  if ($null -eq $i) { return }
+  if ($i.Act -eq "drill") { $script:current = $i.Path; Refresh-List }
+  elseif ($i.Act -eq "pdf") { Open-Pdf $i.Path }
+  else { Open-Office $i.Path }
+}
 
-  $onEnter = { $this.BackColor = $colHover }.GetNewClosure()
-  $onLeave = { $this.BackColor = $colCard }.GetNewClosure()
-  $card.Add_MouseEnter($onEnter)
-  $card.Add_MouseLeave($onLeave)
-  # clicking the label should behave like clicking the card
-  $lbl.Add_Click({ $this.Parent.PerformClick() })
+# $cat: folder|pdf|office|txt (colors + icon)   $act: drill|pdf|office
+function New-Row($cat, $pill, $name, $path, $act) {
+  if ($cat -eq "folder")     { $tint = $folderBg; $accent = $folderFg; $icon = "folder" }
+  elseif ($cat -eq "pdf")    { $tint = $pdfBg;    $accent = $pdfFg;    $icon = "doc" }
+  elseif ($cat -eq "office") { $tint = $officeBg; $accent = $officeFg; $icon = "doc" }
+  else                       { $tint = $txtBg;    $accent = $txtFg;    $icon = "doc" }
 
-  $card.Add_Click({
-    $info = $this.Tag
-    if ($null -eq $info) { return }
-    if ($info.Type -eq "dir") {
-      $script:current = $info.Path
-      Refresh-List
-    } elseif ($info.Type -eq "pdf") {
-      Open-Pdf $info.Path
+  $info = @{ Act = $act; Path = $path }
+
+  $row = New-Object System.Windows.Forms.Panel
+  $row.Height = 52
+  $row.Width = 600
+  $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+  $row.BackColor = $colRow
+  $row.Cursor = "Hand"
+  $row.Tag = $info
+  $row.Add_Resize({ $this.Invalidate() })
+  $bd = $colRowBd
+  $row.Add_Paint({
+    param($snd, $e)
+    $pen = New-Object System.Drawing.Pen($bd, 1)
+    $e.Graphics.DrawRectangle($pen, 0, 0, ($snd.Width - 1), ($snd.Height - 1))
+    $pen.Dispose()
+  }.GetNewClosure())
+
+  # rounded tinted icon badge with a simple GDI line icon
+  $badge = New-Object System.Windows.Forms.Panel
+  $badge.SetBounds(10, 9, 34, 34)
+  $badge.BackColor = $tint
+  $badge.Cursor = "Hand"
+  $badge.Region = New-Object System.Drawing.Region((Get-RoundPath 34 34 8))
+  $badge.Tag = $info
+  $ic = $icon; $acc = $accent
+  $badge.Add_Paint({
+    param($snd, $e)
+    $g = $e.Graphics; $g.SmoothingMode = "AntiAlias"
+    $br = New-Object System.Drawing.SolidBrush($acc)
+    $pen = New-Object System.Drawing.Pen($acc, 2)
+    if ($ic -eq "folder") {
+      $g.FillRectangle($br, 9, 12, 6, 3)
+      $g.FillRectangle($br, 8, 14, 18, 11)
+    } else {
+      $g.DrawRectangle($pen, 11, 8, 12, 18)
+      $g.DrawLine($pen, 14, 13, 20, 13)
+      $g.DrawLine($pen, 14, 17, 20, 17)
+      $g.DrawLine($pen, 14, 21, 18, 21)
     }
-  })
-  return $card
+    $pen.Dispose(); $br.Dispose()
+  }.GetNewClosure())
+  $row.Controls.Add($badge)
+
+  # name label (stretches; ellipsized)
+  $lbl = New-Object System.Windows.Forms.Label
+  $lbl.Text = $name
+  $lbl.ForeColor = $colInk
+  $lbl.BackColor = [System.Drawing.Color]::Transparent
+  $lbl.Font = New-Object System.Drawing.Font($fontName, 13)
+  $lbl.TextAlign = "MiddleLeft"
+  $lbl.AutoEllipsis = $true
+  $lbl.SetBounds(56, 0, 454, 52)
+  $lbl.Anchor = "Top,Bottom,Left,Right"
+  $lbl.Cursor = "Hand"
+  $lbl.Tag = $info
+  $row.Controls.Add($lbl)
+
+  # rounded tinted type pill with accent caption
+  $pillPanel = New-Object System.Windows.Forms.Panel
+  $pillPanel.SetBounds(516, 13, 70, 26)
+  $pillPanel.BackColor = $tint
+  $pillPanel.Cursor = "Hand"
+  $pillPanel.Anchor = "Top,Right"
+  $pillPanel.Region = New-Object System.Drawing.Region((Get-RoundPath 70 26 13))
+  $pillPanel.Tag = $info
+  $pcap = $pill; $pfg = $accent
+  $pillPanel.Add_Paint({
+    param($snd, $e)
+    $g = $e.Graphics; $g.SmoothingMode = "AntiAlias"; $g.TextRenderingHint = "AntiAliasGridFit"
+    $sf = New-Object System.Drawing.StringFormat
+    $sf.Alignment = "Center"; $sf.LineAlignment = "Center"
+    $fnt = New-Object System.Drawing.Font("Segoe UI Semibold", 8)
+    $br = New-Object System.Drawing.SolidBrush($pfg)
+    $rect = New-Object System.Drawing.RectangleF(0, 0, $snd.Width, $snd.Height)
+    $g.DrawString($pcap, $fnt, $br, $rect, $sf)
+    $br.Dispose(); $fnt.Dispose(); $sf.Dispose()
+  }.GetNewClosure())
+  $row.Controls.Add($pillPanel)
+
+  # click routes anywhere on the row
+  $row.Add_Click($rowClick)
+  $badge.Add_Click($rowClick)
+  $lbl.Add_Click($rowClick)
+  $pillPanel.Add_Click($rowClick)
+
+  # hover highlight (capture the row so children can tint it too)
+  $rowRef = $row
+  $enter = { $rowRef.BackColor = $colHover }.GetNewClosure()
+  $leave = { $rowRef.BackColor = $colRow }.GetNewClosure()
+  $row.Add_MouseEnter($enter);       $row.Add_MouseLeave($leave)
+  $lbl.Add_MouseEnter($enter);       $lbl.Add_MouseLeave($leave)
+  $badge.Add_MouseEnter($enter);     $badge.Add_MouseLeave($leave)
+  $pillPanel.Add_MouseEnter($enter); $pillPanel.Add_MouseLeave($leave)
+
+  return $row
 }
 
 function Update-Up {
@@ -1569,15 +1698,17 @@ function Get-DisplayPath {
 function Refresh-List {
   $flow.SuspendLayout()
   $flow.Controls.Clear()
+  if ($null -eq $script:current) { $lblTitle.Text = "PDF Files" } else { $lblTitle.Text = Split-Path -Leaf $script:current }
   $lblPath.Text = Get-DisplayPath
   Update-Up
 
   if ($null -eq $script:current) {
     # two-root home
     foreach ($r in $roots) {
-      $flow.Controls.Add((New-Card "dir" $r.Name $r.Path))
+      $flow.Controls.Add((New-Row "folder" "Folder" $r.Name $r.Path "drill"))
     }
     $flow.ResumeLayout()
+    Fit-Rows
     return
   }
 
@@ -1586,17 +1717,28 @@ function Refresh-List {
     $dirs = Get-ChildItem -LiteralPath $script:current -Directory -Force -ErrorAction Stop | Sort-Object Name
   } catch { $dirs = @() }
   foreach ($d in $dirs) {
-    try { $flow.Controls.Add((New-Card "dir" $d.Name $d.FullName)) } catch {}
+    try { $flow.Controls.Add((New-Row "folder" "Folder" $d.Name $d.FullName "drill")) } catch {}
   }
 
+  $exts = @(".pdf", ".odt", ".txt", ".doc", ".docx")
   $files = @()
   try {
-    $files = Get-ChildItem -LiteralPath $script:current -File -Force -ErrorAction Stop | Where-Object { $_.Extension -ieq ".pdf" } | Sort-Object Name
+    $files = Get-ChildItem -LiteralPath $script:current -File -Force -ErrorAction Stop | Where-Object { $exts -contains $_.Extension.ToLower() } | Sort-Object Name
   } catch { $files = @() }
   foreach ($f in $files) {
-    try { $flow.Controls.Add((New-Card "pdf" $f.Name $f.FullName)) } catch {}
+    $ext = $f.Extension.ToLower()
+    switch ($ext) {
+      ".pdf"  { $cat = "pdf";    $pill = "PDF";  $act = "pdf" }
+      ".txt"  { $cat = "txt";    $pill = "TXT";  $act = "office" }
+      ".odt"  { $cat = "office"; $pill = "ODT";  $act = "office" }
+      ".doc"  { $cat = "office"; $pill = "DOC";  $act = "office" }
+      ".docx" { $cat = "office"; $pill = "DOCX"; $act = "office" }
+      default { $cat = "txt";    $pill = "FILE"; $act = "office" }
+    }
+    try { $flow.Controls.Add((New-Row $cat $pill $f.Name $f.FullName $act)) } catch {}
   }
   $flow.ResumeLayout()
+  Fit-Rows
 }
 
 function Go-Up {
@@ -1620,12 +1762,6 @@ function Go-Up {
 }
 
 $btnUp.Add_Click({ Go-Up })
-
-# hover effect on buttons
-$btnUp.Add_MouseEnter({ if ($this.Enabled) { $this.BackColor = $colHover } })
-$btnUp.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(30,41,59) })
-$btnClose.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(220,80,80) })
-$btnClose.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(190,60,60) })
 
 Refresh-List
 [System.Windows.Forms.Application]::EnableVisualStyles()
