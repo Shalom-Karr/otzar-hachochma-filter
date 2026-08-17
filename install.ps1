@@ -41,13 +41,33 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
-    # --- download the latest scripts from GitHub Pages ---
+    # --- download the latest scripts ---
+    # Try GitHub Pages first, then fall back to raw.githubusercontent.com (which is NOT subject to
+    # Pages build lag), and retry a few times - so a transient 404 during a Pages rebuild can't
+    # abort the install.
+    $Raw = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/main"
+    function Get-Script($f) {
+        $dest    = Join-Path $Work $f
+        $sources = @("$Pages/$f?nocache=$([guid]::NewGuid())", "$Raw/$f?nocache=$([guid]::NewGuid())")
+        $lastErr = $null
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            foreach ($u in $sources) {
+                try {
+                    Invoke-WebRequest -Uri $u -OutFile $dest -UseBasicParsing -TimeoutSec 60 `
+                        -Headers @{ 'Cache-Control' = 'no-cache' }
+                    if ((Test-Path $dest) -and (Get-Item $dest).Length -gt 0) { return }
+                } catch { $lastErr = $_ }
+            }
+            Start-Sleep -Seconds ($attempt * 3)   # 3s, 6s, 9s, 12s between rounds
+        }
+        throw "Could not download '$f' after several tries. $($lastErr.Exception.Message)"
+    }
+
     Line "Downloading the latest kiosk scripts..." Cyan
     $files = @('setup.ps1','create.ps1','updater.ps1','uninstall.ps1','diagnostics.ps1','version')
     foreach ($f in $files) {
         Line "  - $f"
-        Invoke-WebRequest -Uri "$Pages/$f?nocache=$([guid]::NewGuid())" -OutFile (Join-Path $Work $f) `
-            -UseBasicParsing -TimeoutSec 60 -Headers @{ 'Cache-Control' = 'no-cache' }
+        Get-Script $f
     }
     $ver = (Get-Content -LiteralPath (Join-Path $Work 'version') -Raw).Trim()
     Line "Latest version: v$ver" DarkGray
