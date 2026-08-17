@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.3'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.4'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1337,6 +1337,11 @@ if ($script:pgOn) {
         foreach ($j in $jobs) {
           $key = "$pn|$($j.Id)"; $cur[$key] = $true
           if ($script:pgSeen.ContainsKey($key)) { continue }
+          # Do NOT touch a job while it is still spooling - suspending mid-spool makes the app
+          # hang on "Waiting for printer connection...". Wait until it is fully sent to the queue,
+          # then hold it and show the confirm popup.
+          $jst = ''; try { $jst = [string]$j.JobStatus } catch {}
+          if ($jst -match 'Spooling') { continue }
           $script:pgSeen[$key] = $true
           try { Suspend-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue } catch {}
           $pages = 0; try { $pages = [int]$j.TotalPages } catch {}
