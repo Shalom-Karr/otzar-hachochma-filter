@@ -45,15 +45,15 @@ param(
     [double]$PricePerPage   = 0.25,    # cost shown per page in the print-confirm dialog (display only - no money is collected)
     [string]$PrintCurrency  = '$',     # currency symbol shown in the print-confirm dialog
     [string]$LibreOfficeExe = "C:\Program Files\LibreOffice\program\soffice.exe",
-    [string]$PrinterIP      = '',      # one-time: auto-install a network printer at this IP (e.g. 192.168.9.70) so the kiosk has a REAL printer, and make it the kiosk user's default
-    [string]$PrinterQueue   = 'Xerox WorkCentre 3215',   # queue name for the auto-installed printer
-    [string]$PrinterDriver  = '',      # exact driver name for it; empty = best installed match is picked
+    [string]$PrinterIP      = '',      # one-time: auto-install a network printer at this IP so the kiosk has a REAL printer, and make it the kiosk user's default
+    [string]$PrinterQueue   = 'Shul Printer',   # queue name for the auto-installed printer; start it with the brand/model (e.g. 'Brother HL-L2370DW') to help the driver pick
+    [string]$PrinterDriver  = '',      # exact driver name for it; empty = best installed match is picked (queue-name match, then brand match, then a lone Class Driver)
     [switch]$ListOnly,
     [switch]$Undo,
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.7'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.8'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -388,16 +388,25 @@ if (-not $Undo -and $PrinterIP -ne '') {
             $drv = $null
             if ($PrinterDriver -ne '') { $drv = Get-PrinterDriver -Name $PrinterDriver -ErrorAction SilentlyContinue }
             if (-not $drv) {
-                foreach ($cand in @("*$PrinterQueue*", 'Xerox*Class Driver*', 'Xerox*')) {
-                    $drv = @(Get-PrinterDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $cand }) | Select-Object -First 1
+                $brand = $PrinterQueue.Split(' ')[0]
+                foreach ($cand in @("*$PrinterQueue*", "$brand*Class Driver*", "$brand*")) {
+                    $drv = @(Get-PrinterDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $cand -and $_.Name -notlike '*Fax*' }) | Select-Object -First 1
                     if ($drv) { break }
                 }
+            }
+            if (-not $drv) {
+                # last resort: if exactly ONE generic class driver is installed, it is almost
+                # certainly the one that came with this machine's printer
+                $cls = @(Get-PrinterDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Class Driver*' -and $_.Name -notlike 'Microsoft*' -and $_.Name -notlike 'Universal*' -and $_.Name -notlike '*Fax*' })
+                if ($cls.Count -eq 1) { $drv = $cls[0] }
             }
             if ($drv) {
                 Add-Printer -Name $PrinterQueue -DriverName $drv.Name -PortName $ppName
                 Write-Host "  installed '$PrinterQueue' on $PrinterIP (driver: $($drv.Name))." -ForegroundColor Green
             } else {
-                Write-Host "  NO matching driver found - install the printer's driver first, then re-run with -PrinterIP." -ForegroundColor Red
+                Write-Host "  NO matching driver found. Installed drivers are:" -ForegroundColor Red
+                Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    - $($_.Name)" -ForegroundColor Yellow }
+                Write-Host "  Re-run with -PrinterDriver '<exact name from the list>' (or install the printer's driver first)." -ForegroundColor Red
             }
         }
     } catch { Write-Host "  printer install error: $($_.Exception.Message)" -ForegroundColor Red }
