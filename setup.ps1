@@ -50,7 +50,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.2'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -428,7 +428,7 @@ if ($LASTEXITCODE -ne 0) {
         # NOTE: DisableCMD intentionally NOT set - Otzar needs cmd.exe to run at startup.
         reg add $sys   /v DisableChangePassword      /t REG_DWORD /d 1 /f | Out-Null   # remove "Change a password" on Ctrl+Alt+Del
         reg add $sys   /v DisableLockWorkstation     /t REG_DWORD /d 1 /f | Out-Null   # disable Win+L AND "Lock" on Ctrl+Alt+Del
-        reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /t REG_DWORD /d 1 /f | Out-Null   # remove "Switch user" on Ctrl+Alt+Del
+        reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /f 2>$null | Out-Null   # NEVER hide fast-user-switching - it also hides the Otzar account at the login screen; clean up any prior value
         reg add $exp   /v NoRun                      /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoControlPanel             /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoWinKeys                  /t REG_DWORD /d 1 /f | Out-Null   # disable Win+key shortcuts (Win+I/Win+E...)
