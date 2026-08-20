@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.11'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.12'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -320,7 +320,7 @@ if (-not $Undo) {
             Where-Object { $_.FullName -match $prnVendorRe } |
             ForEach-Object { Set-ExeDeny $_.FullName $false; $healed++ }
     }
-    if ($healed) { Write-Host "  printer-vendor exes UN-blocked (support software must run to print): $healed" -ForegroundColor Green }
+    Slog "  printer-vendor exes UN-blocked (support software must run to print): $healed" "Green"
 }
 Write-Host "  done ($($deny.Count) items)." -ForegroundColor Green
 
@@ -568,7 +568,7 @@ if ($LASTEXITCODE -ne 0) {
         if ($physPrn) {
             reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v LegacyDefaultPrinterMode /t REG_DWORD /d 1 /f | Out-Null
             reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v Device /t REG_SZ /d "$($physPrn.Name),winspool,$($physPrn.PortName)" /f | Out-Null
-            Write-Host "  kiosk default printer -> '$($physPrn.Name)' (port $($physPrn.PortName))" -ForegroundColor Green
+            Slog "  kiosk default printer -> '$($physPrn.Name)' (port $($physPrn.PortName))" "Green"
             # Some drivers (Brother etc.) spool RAW printer bytes, so Windows never learns the
             # page count and the print gate shows "page count unknown". Clearing the raw-only
             # flag (= "Enable advanced printing features") makes jobs spool as EMF, which the
@@ -681,6 +681,43 @@ $LogDir = "C:\Users\Public\Documents\OtzarKiosk"
 try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
 function Log($m) { try { Add-Content -LiteralPath "$LogDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
 Log "launcher started"
+# --- start printer-vendor support processes (normally started by explorer via the Run keys). ---
+# The kiosk shell REPLACES explorer, so Run-key programs never start in this session. Brother's
+# HttpToUsbBridge.exe carries IPP-over-USB between Windows and a USB Brother - without it the
+# driver cannot reach the printer ("Waiting for printer connection...", 0-sheet preview).
+try {
+  $prnVendorRe = '(?i)\\(Brother|Xerox|Canon|Epson|Lexmark|Ricoh|Kyocera|OKI(DATA)?|Konica Minolta|SHARP)\\'
+  $prnStart = New-Object System.Collections.ArrayList
+  foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
+    try {
+      $rv = Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue
+      if ($rv) { foreach ($pp in $rv.PSObject.Properties) {
+        if ($pp.Name -match '^PS') { continue }
+        $cmd = [string]$pp.Value
+        if ($cmd -match $prnVendorRe) { [void]$prnStart.Add($cmd) }
+      } }
+    } catch {}
+  }
+  # well-known helper that may not be in a Run key on every install
+  foreach ($kb in "${env:ProgramFiles(x86)}\Brother\HttpToUsbBridge\HttpToUsbBridge.exe",
+                  "$env:ProgramFiles\Brother\HttpToUsbBridge\HttpToUsbBridge.exe") {
+    if (Test-Path -LiteralPath $kb) { [void]$prnStart.Add('"' + $kb + '"') }
+  }
+  foreach ($cmd in ($prnStart | Sort-Object -Unique)) {
+    # split "exe" from arguments (quoted or bare path)
+    $exe = $null; $cmdArgs = ''
+    if ($cmd -match '^\s*"([^"]+)"\s*(.*)$') { $exe = $matches[1]; $cmdArgs = $matches[2] }
+    elseif ($cmd -match '^\s*(\S+)\s*(.*)$')  { $exe = $matches[1]; $cmdArgs = $matches[2] }
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { Log "printer support SKIP (missing): $cmd"; continue }
+    $bn = [System.IO.Path]::GetFileNameWithoutExtension($exe)
+    if (Get-Process -Name $bn -ErrorAction SilentlyContinue) { Log "printer support already running: $bn"; continue }
+    try {
+      if ($cmdArgs) { Start-Process -FilePath $exe -ArgumentList $cmdArgs -WindowStyle Hidden } else { Start-Process -FilePath $exe -WindowStyle Hidden }
+      Log "printer support STARTED: $exe $cmdArgs"
+    } catch { Log "printer support FAILED to start ($exe): $($_.Exception.Message)" }
+  }
+} catch { Log "printer support scan err: $($_.Exception.Message)" }
 # --- block the Windows key (kills Win+A Quick Settings, Win+I, Win+X, Start, etc.) ---
 # A low-level keyboard hook is the only reliable way with a custom shell; the NoWinKeys policy does not
 # apply because Explorer is not the shell. This CANNOT block Ctrl+Alt+Del, so the admin hatch still works.
