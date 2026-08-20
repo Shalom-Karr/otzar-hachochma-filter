@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.16'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.17'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -690,6 +690,24 @@ function Dbg($m) {
 }
 Log "launcher started"
 Dbg "===== debugger started (pid $PID) ====="
+# --- audit: log what explorer WOULD have run at logon (we replaced it, so these do NOT auto-run) ---
+# Read-only inventory so we can see if anything besides the printer bridge is needed. Nothing here
+# is auto-executed (RunOnce/Startup can carry destructive or unwanted leftovers) - it is logged for review.
+try {
+  foreach ($rk in 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+                  'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+                  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+                  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
+                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce') {
+    $rv = Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue
+    if ($rv) { foreach ($pp in $rv.PSObject.Properties) { if ($pp.Name -notmatch '^PS') { Log "explorer-would-run: [$($rk -replace '.*\\CurrentVersion\\','')] $($pp.Name) = $($pp.Value)" } } }
+  }
+  foreach ($sf in ([Environment]::GetFolderPath('Startup')),
+                  ([Environment]::GetFolderPath('CommonStartup'))) {
+    if ($sf -and (Test-Path $sf)) { Get-ChildItem $sf -File -ErrorAction SilentlyContinue | ForEach-Object { Log "explorer-would-run: [Startup] $($_.Name)" } }
+  }
+} catch { Log "startup-audit err: $($_.Exception.Message)" }
 # --- start printer-vendor support processes (normally started by explorer via the Run keys). ---
 # The kiosk shell REPLACES explorer, so Run-key programs never start in this session. Brother's
 # HttpToUsbBridge.exe carries IPP-over-USB between Windows and a USB Brother - without it the
