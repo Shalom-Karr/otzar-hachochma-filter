@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.14'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.15'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -2152,6 +2152,59 @@ if ((-not $Undo) -and (Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyConti
     try { Set-LocalUser -Name $OtzarUser -Password (New-Object System.Security.SecureString) -ErrorAction Stop } catch { }  # method 2 (fallback)
     Set-LocalUser -Name $OtzarUser -PasswordNeverExpires $true -ErrorAction SilentlyContinue
     Write-Host "Set '$OtzarUser' to a BLANK password (logs in with no password)." -ForegroundColor Green
+}
+
+# ---------------- write a health report to diagnostics.log (admin-side snapshot) ----------------
+if (-not $Undo) {
+    try {
+        $diagPath = "$PubLog\diagnostics.log"
+        $D = New-Object System.Collections.ArrayList
+        function DL($m) { [void]$D.Add($m) }
+        DL "===== Otzar Hachochma kiosk diagnostics - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - setup v$KioskVersion ====="
+
+        DL "`n----- ACCOUNT -----"
+        $u = Get-LocalUser -Name $OtzarUser -ErrorAction SilentlyContinue
+        if ($u) {
+            $sid = $u.SID.Value
+            DL "Name=$($u.Name)  Enabled=$($u.Enabled)  SID=$sid"
+            $admins = (Get-LocalGroupMember Administrators -ErrorAction SilentlyContinue).SID.Value
+            DL "Admin? $([bool]($admins -contains $sid))"
+            DL "`n----- PROFILES (more than one = the duplicate-profile bug) -----"
+            Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $sid } | ForEach-Object { DL "  $($_.LocalPath)  (loaded=$($_.Loaded))" }
+        } else { DL "Account '$OtzarUser' NOT FOUND." }
+
+        DL "`n----- PRINTERS -----"
+        Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { DL "  $($_.Name)  [driver=$($_.DriverName); port=$($_.PortName); status=$($_.PrinterStatus); type=$($_.Type)]" }
+        DL "  default (this admin session): $((Get-CimInstance Win32_Printer -Filter 'Default=TRUE' -ErrorAction SilentlyContinue).Name)"
+        DL "`n  installed drivers:"
+        Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { DL "    $($_.Name)" }
+
+        DL "`n----- PRINT / USB / DEVICE SERVICES -----"
+        Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)spool|print|ipp|usb|LxpsSvc|device' } | ForEach-Object { DL "  $($_.Name) = $($_.Status) ($($_.StartType))" }
+
+        DL "`n----- PRINTER-VENDOR PROCESSES + Run keys + exe ACL (kiosk-user deny still there?) -----"
+        $pv = '(?i)\\(Brother|Xerox|Canon|Epson|Lexmark|Ricoh|Kyocera|OKI(DATA)?|Konica Minolta|SHARP)\\'
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match $pv } | Select-Object -ExpandProperty Path -Unique | ForEach-Object { DL "  running: $_" }
+        foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
+            $rv = Get-ItemProperty $rk -ErrorAction SilentlyContinue
+            if ($rv) { foreach ($pp in $rv.PSObject.Properties) { if ($pp.Name -notmatch '^PS' -and [string]$pp.Value -match $pv) { DL "  Run key [$($pp.Name)] = $($pp.Value)" } } }
+        }
+        foreach ($bx in "${env:ProgramFiles(x86)}\Brother","$env:ProgramFiles\Brother") {
+            Get-ChildItem $bx -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object {
+                $acl = (icacls $_.FullName 2>$null | Out-String)
+                if ($acl -match [regex]::Escape($OtzarUser)) {
+                    $line = (($acl -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($OtzarUser) }) -join ' | '
+                    DL "  ACL DENY-CHECK $($_.FullName): $line"
+                }
+            }
+        }
+
+        DL "`n----- KIOSK FILES + SHELL -----"
+        foreach ($kf in 'D:\Kiosk','C:\Kiosk') { if (Test-Path $kf) { DL "  install dir: $kf"; Get-ChildItem $kf -File -ErrorAction SilentlyContinue | ForEach-Object { DL "    $($_.Name)  $($_.Length)b  $($_.LastWriteTime)" } } }
+
+        Set-Content -LiteralPath $diagPath -Value ($D -join "`r`n") -Encoding UTF8
+        Slog "Wrote health report -> $diagPath" "Green"
+    } catch { Slog "diagnostics.log write failed: $($_.Exception.Message)" "Yellow" }
 }
 
 Slog "===== setup.ps1 DONE. Reboot or sign into '$OtzarUser' to verify. =====" "Magenta"
