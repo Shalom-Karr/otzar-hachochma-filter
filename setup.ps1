@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.9'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.10'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -414,6 +414,24 @@ if (-not $Undo -and $PrinterIP -ne '') {
     } catch { Write-Host "  printer install error: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
+# ---------------- 3c. heal wedged print queues ----------------
+# Jobs left suspended mid-spool (the OLD print gate paused jobs too early) wedge the queue:
+# the printer sits in an error state and Edge's preview shows "0 pages" for it. Clear every
+# queued job and bounce the spooler so the queues start clean.
+if (-not $Undo) {
+    try {
+        $stale = 0
+        foreach ($pq in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            foreach ($pj in @(Get-PrintJob -PrinterName $pq.Name -ErrorAction SilentlyContinue)) {
+                try { Remove-PrintJob -PrinterName $pq.Name -ID $pj.Id -ErrorAction SilentlyContinue; $stale++ } catch {}
+            }
+        }
+        Restart-Service Spooler -Force -ErrorAction SilentlyContinue
+        Start-Sleep 2
+        Write-Host "  print queues cleared ($stale stale job(s) removed) and spooler restarted." -ForegroundColor Green
+    } catch { Write-Host "  queue cleanup: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
 Slog "Editing the kiosk user hive: policies + launcher shell + writing launcher scripts..." "Cyan"
 $line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
@@ -534,6 +552,17 @@ if ($LASTEXITCODE -ne 0) {
             reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v LegacyDefaultPrinterMode /t REG_DWORD /d 1 /f | Out-Null
             reg add "HKU\LockAll\Software\Microsoft\Windows NT\CurrentVersion\Windows" /v Device /t REG_SZ /d "$($physPrn.Name),winspool,$($physPrn.PortName)" /f | Out-Null
             Write-Host "  kiosk default printer -> '$($physPrn.Name)' (port $($physPrn.PortName))" -ForegroundColor Green
+            # Some drivers (Brother etc.) spool RAW printer bytes, so Windows never learns the
+            # page count and the print gate shows "page count unknown". Clearing the raw-only
+            # flag (= "Enable advanced printing features") makes jobs spool as EMF, which the
+            # spooler CAN count.
+            try {
+                $wmiPrn = Get-CimInstance Win32_Printer -Filter ("Name='" + ($physPrn.Name -replace "'","''") + "'") -ErrorAction SilentlyContinue
+                if ($wmiPrn -and $wmiPrn.RawOnly) {
+                    $wmiPrn | Set-CimInstance -Property @{ RawOnly = $false } -ErrorAction Stop
+                    Write-Host "  enabled page counting on '$($physPrn.Name)' (cleared raw-only spooling)" -ForegroundColor Green
+                }
+            } catch { Write-Host "  could not clear raw-only spooling on '$($physPrn.Name)': $($_.Exception.Message)" -ForegroundColor Yellow }
         } else {
             Write-Host "  NO real printer found on this machine (only virtual queues) - plug in / install the printer and re-run setup." -ForegroundColor Yellow
         }
