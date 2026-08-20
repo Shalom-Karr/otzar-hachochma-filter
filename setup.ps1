@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.13'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.14'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -756,25 +756,33 @@ try {
 try {
   Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class KHook {
   public delegate IntPtr Proc(int nCode, IntPtr wParam, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int idHook, Proc lpfn, IntPtr hMod, uint dwThreadId);
   [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
   [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string lpModuleName);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 }
 "@
-  # thread-safe keystroke buffer; the hook only enqueues (fast), a timer flushes to debugger.log
-  $script:kbBuf = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+  # thread-safe input-event buffer; hooks only enqueue (fast), a timer resolves+writes debugger.log.
+  # Each item: @{ k='KEY'|'CLICK'|'MOVE'|'WHEEL'; vk; btn; x; y; time }
+  $script:evtBuf  = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+  $script:mstate  = [hashtable]::Synchronized(@{ lastMove = 0 })
+  # -- keyboard hook (WH_KEYBOARD_LL): log key-downs, swallow the Windows keys --
   $script:khProc = [KHook+Proc]{
     param($nCode, $wParam, $lParam)
     try {
       if ($nCode -ge 0) {
         $vk = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam)   # vkCode = first field of KBDLLHOOKSTRUCT
         $w = $wParam.ToInt32()
-        if ($w -eq 0x100 -or $w -eq 0x104) {   # WM_KEYDOWN / WM_SYSKEYDOWN
-          [void]$script:kbBuf.Add(("{0:HH:mm:ss.fff} vk=0x{1:X2} ({2})" -f (Get-Date), $vk, $vk))
-        }
+        if ($w -eq 0x100 -or $w -eq 0x104) { [void]$script:evtBuf.Add(@{ k='KEY'; vk=$vk; time=(Get-Date) }) }   # WM_KEYDOWN / WM_SYSKEYDOWN
         if ($vk -eq 0x5B -or $vk -eq 0x5C) { return [IntPtr]1 }              # swallow Left/Right Windows key
       }
     } catch {}
@@ -782,19 +790,71 @@ public class KHook {
   }
   $script:khHook = [KHook]::SetWindowsHookEx(13, $script:khProc, [KHook]::GetModuleHandle($null), 0)   # WH_KEYBOARD_LL = 13
   if ($script:khHook -eq [IntPtr]::Zero) { Log "WARN: Windows-key hook NOT installed" } else { Log "Windows-key blocked (low-level keyboard hook installed)" }
-} catch { Log "keyboard hook error: $($_.Exception.Message)" }
-# flush buffered keystrokes to debugger.log (keeps file I/O out of the hook callback)
+  # -- mouse hook (WH_MOUSE_LL): log clicks/wheel + throttled movement; never swallow --
+  $script:mhProc = [KHook+Proc]{
+    param($nCode, $wParam, $lParam)
+    try {
+      if ($nCode -ge 0) {
+        $x = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam, 0)   # MSLLHOOKSTRUCT.pt.x
+        $y = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam, 4)   # MSLLHOOKSTRUCT.pt.y
+        switch ($wParam.ToInt32()) {
+          0x0201 { [void]$script:evtBuf.Add(@{ k='CLICK'; btn='L'; x=$x; y=$y; time=(Get-Date) }) }   # WM_LBUTTONDOWN
+          0x0204 { [void]$script:evtBuf.Add(@{ k='CLICK'; btn='R'; x=$x; y=$y; time=(Get-Date) }) }   # WM_RBUTTONDOWN
+          0x0207 { [void]$script:evtBuf.Add(@{ k='CLICK'; btn='M'; x=$x; y=$y; time=(Get-Date) }) }   # WM_MBUTTONDOWN
+          0x020A { [void]$script:evtBuf.Add(@{ k='WHEEL'; x=$x; y=$y; time=(Get-Date) }) }            # WM_MOUSEWHEEL
+          0x0200 {                                                                                     # WM_MOUSEMOVE (throttled)
+            $now = [Environment]::TickCount
+            if (($now - [int]$script:mstate['lastMove']) -ge 400) { $script:mstate['lastMove'] = $now; [void]$script:evtBuf.Add(@{ k='MOVE'; x=$x; y=$y; time=(Get-Date) }) }
+          }
+        }
+      }
+    } catch {}
+    return [KHook]::CallNextHookEx([IntPtr]::Zero, $nCode, $wParam, $lParam)
+  }
+  $script:mhHook = [KHook]::SetWindowsHookEx(14, $script:mhProc, [KHook]::GetModuleHandle($null), 0)   # WH_MOUSE_LL = 14
+  if ($script:mhHook -eq [IntPtr]::Zero) { Log "WARN: mouse hook NOT installed" } else { Log "mouse logging on (low-level mouse hook installed)" }
+} catch { Log "input hook error: $($_.Exception.Message)" }
+# flush buffered input events to debugger.log (keeps slow calls out of the hook callbacks)
 try {
+  $script:winCache = @{}
   $kbTmr = New-Object System.Windows.Forms.Timer
-  $kbTmr.Interval = 1000
+  $kbTmr.Interval = 700
   $kbTmr.Add_Tick({
-    if ($script:kbBuf -and $script:kbBuf.Count) {
-      $snap = @($script:kbBuf.ToArray()); $script:kbBuf.Clear()
-      foreach ($e in $snap) { Dbg ("KEY " + $e) }
+    if (-not ($script:evtBuf -and $script:evtBuf.Count)) { return }
+    $snap = @($script:evtBuf.ToArray()); $script:evtBuf.Clear()
+    foreach ($e in $snap) {
+      try {
+        $t = $e.time.ToString('HH:mm:ss.fff')
+        if ($e.k -eq 'KEY') {
+          $vk = [int]$e.vk
+          $name = try { [string]([System.Windows.Forms.Keys]$vk) } catch { "vk$vk" }
+          $mc = ([KHook]::MapVirtualKey([uint32]$vk, 2)) -band 0xFFFF     # MAPVK_VK_TO_CHAR
+          $ch = if ($mc -gt 32) { " '" + [char]$mc + "'" } else { '' }
+          Dbg ("{0}  KEY   vk=0x{1:X2} {2}{3}" -f $t, $vk, $name, $ch)
+        } else {
+          # resolve the on-screen thing at the click/move point
+          $pt = New-Object KHook+POINT; $pt.X = [int]$e.x; $pt.Y = [int]$e.y
+          $h = [KHook]::WindowFromPoint($pt)
+          $key = [string]$h
+          if ($script:winCache.ContainsKey($key)) { $info = $script:winCache[$key] }
+          else {
+            $cls = New-Object System.Text.StringBuilder 256; [void][KHook]::GetClassName($h, $cls, 256)
+            $ttl = New-Object System.Text.StringBuilder 256; [void][KHook]::GetWindowText($h, $ttl, 256)
+            $procId = 0; [void][KHook]::GetWindowThreadProcessId($h, [ref]$procId)
+            $pname = try { (Get-Process -Id $procId -ErrorAction Stop).ProcessName } catch { '?' }
+            $info = "proc=$pname class='$($cls.ToString())' title='$($ttl.ToString())'"
+            if ($script:winCache.Count -lt 200) { $script:winCache[$key] = $info }
+          }
+          if ($e.k -eq 'CLICK')      { Dbg ("{0}  CLICK {1} at {2},{3}  -> {4}" -f $t, $e.btn, $e.x, $e.y, $info) }
+          elseif ($e.k -eq 'WHEEL')  { Dbg ("{0}  WHEEL at {1},{2}  -> {3}"     -f $t, $e.x, $e.y, $info) }
+          else                       { Dbg ("{0}  MOVE  at {1},{2}  -> {3}"     -f $t, $e.x, $e.y, $info) }
+        }
+      } catch {}
     }
+    if ($script:winCache.Count -ge 200) { $script:winCache.Clear() }   # stale handles get reused; periodic reset
   })
   $kbTmr.Start()
-} catch { Log "keystroke-flush timer error: $($_.Exception.Message)" }
+} catch { Log "input-flush timer error: $($_.Exception.Message)" }
 $colBg   = [System.Drawing.Color]::FromArgb(244,239,227)
 $colTile = [System.Drawing.Color]::FromArgb(255,253,248)
 
