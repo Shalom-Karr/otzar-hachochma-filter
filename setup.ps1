@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.10'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.11'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -243,9 +243,15 @@ foreach ($dsk in (Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -Error
     Get-ChildItem $root -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $found.Add($_.FullName) }
 }
 
+# printer-vendor SUPPORT SOFTWARE must stay runnable for the kiosk user: e.g. Brother's
+# HttpToUsbBridge.exe carries the IPP-over-USB traffic between Windows and a USB Brother -
+# blocking it means "Waiting for printer connection..." and a 0-page Edge preview.
+$prnVendorRe = '(?i)\\(Brother|Xerox|Canon|Epson|Lexmark|Ricoh|Kyocera|OKI(DATA)?|Konica Minolta|SHARP)\\'
+
 # dedupe + drop anything under an allowed folder; keep per-user Program installs, drop other in-profile noise
 $deny = @($found | Sort-Object -Unique | Where-Object {
     (-not (Test-Allowed $_)) -and
+    ($_ -notmatch $prnVendorRe) -and
     ( ($_ -notmatch '(?i)\\Users\\') -or ($_ -match '(?i)\\AppData\\Local\\Programs\\') )
 })
 
@@ -305,6 +311,17 @@ Write-Host "`n===== $verb lockdown =====" -ForegroundColor Magenta
 Write-Host "NTFS execute rules ..." -ForegroundColor Cyan
 $i = 0
 foreach ($p in $deny) { $i++; Set-ExeDeny $p (-not $Undo); if ($i % 25 -eq 0) { Write-Host "  ...$i/$($deny.Count)" } }
+# heal printer-vendor exes that EARLIER versions swept into the deny list (see $prnVendorRe above)
+if (-not $Undo) {
+    $healed = 0
+    foreach ($pf in @("$env:ProgramFiles", "${env:ProgramFiles(x86)}", "$env:ProgramData")) {
+        if (-not (Test-Path $pf)) { continue }
+        Get-ChildItem $pf -Recurse -Depth 4 -Filter *.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match $prnVendorRe } |
+            ForEach-Object { Set-ExeDeny $_.FullName $false; $healed++ }
+    }
+    if ($healed) { Write-Host "  printer-vendor exes UN-blocked (support software must run to print): $healed" -ForegroundColor Green }
+}
 Write-Host "  done ($($deny.Count) items)." -ForegroundColor Green
 
 # Edge is the PDF viewer -> make sure msedge.exe is NOT left denied from a previous run
@@ -490,7 +507,7 @@ if ($LASTEXITCODE -ne 0) {
         reg add $sys   /v DisableRegistryTools       /t REG_DWORD /d 1 /f | Out-Null
         # NOTE: DisableCMD intentionally NOT set - Otzar needs cmd.exe to run at startup.
         reg add $sys   /v DisableChangePassword      /t REG_DWORD /d 1 /f | Out-Null   # remove "Change a password" on Ctrl+Alt+Del
-        reg add $sys   /v DisableLockWorkstation     /t REG_DWORD /d 1 /f | Out-Null   # disable Win+L AND "Lock" on Ctrl+Alt+Del
+        reg delete $sys /v DisableLockWorkstation    /f 2>$null | Out-Null   # locking is ALLOWED: the "Admin Login" button locks to the login screen; Win+L stays dead anyway (the bar's keyboard hook swallows the Windows keys)
         reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /f 2>$null | Out-Null   # NEVER hide fast-user-switching - it also hides the Otzar account at the login screen; clean up any prior value
         reg add $exp   /v NoRun                      /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoControlPanel             /t REG_DWORD /d 1 /f | Out-Null
@@ -1268,8 +1285,8 @@ $btnLang.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(244
 $btnLang.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(255,253,248) })
 $btnLang.Add_Click({ Toggle-Lang; try { $btnLang.Text = Get-ForeLang } catch {} })
 $bar.Controls.Add($btnLang)
-# Admin Login button (just before the credit) - RESTARTS the PC (with a confirm) so you land on the login
-# screen and can log in as admin (khaly). Lock/Win+L and Sign-out are disabled, so restart is the way in.
+# Admin Login button (just before the credit) - LOCKS the session so the login screen appears and the
+# admin can sign in. No restart needed; the Otzar session stays alive in the background.
 $btnAdmin = New-Object System.Windows.Forms.Button
 $btnAdmin.Text = "Admin Login"; $btnAdmin.SetBounds(($scr.Width - 570), 12, 150, 48)
 $btnAdmin.FlatStyle = "Flat"; $btnAdmin.FlatAppearance.BorderSize = 0
@@ -1282,9 +1299,14 @@ $btnAdmin.Add_MouseEnter({ $this.BackColor = [System.Drawing.Color]::FromArgb(49
 $btnAdmin.Add_MouseLeave({ $this.BackColor = [System.Drawing.Color]::FromArgb(34,48,63) })
 $btnAdmin.Add_Click({
   try {
-    $r = [System.Windows.Forms.MessageBox]::Show($bar, "Restart the computer to log in as the administrator?", "Admin Login", "YesNo", "Question")
-    if ($r -eq "Yes") { Log "admin login: restarting to the login screen"; Restart-Computer -Force }
-  } catch { Log "admin restart failed: $($_.Exception.Message)" }
+    Log "admin login: locking to the login screen"
+    if (-not [WA]::LockWorkStation()) { throw "LockWorkStation returned false (is the lock policy blocking it?)" }
+  } catch {
+    Log "admin lock failed: $($_.Exception.Message)"
+    # fallback so the button is never a dead end
+    $r = [System.Windows.Forms.MessageBox]::Show($bar, "Locking failed - restart the computer to reach the login screen instead?", "Admin Login", "YesNo", "Question")
+    if ($r -eq "Yes") { Restart-Computer -Force }
+  }
 })
 $bar.Controls.Add($btnAdmin)
 $barCred = New-Object System.Windows.Forms.Label
@@ -1415,6 +1437,7 @@ $script:pgRate = __PGRATE__
 $script:pgCur  = '__PGCUR__'
 $script:pgOn   = __PGON__
 $script:pgSeen = @{}
+$script:pgDbg  = @{}
 $script:pgPrinters = @()
 $script:pgRefresh = 0
 $script:pgBusy = $false
@@ -1436,6 +1459,9 @@ if ($script:pgOn) {
         try { $jobs = @(Get-PrintJob -PrinterName $pn -ErrorAction SilentlyContinue) } catch {}
         foreach ($j in $jobs) {
           $key = "$pn|$($j.Id)"; $cur[$key] = $true
+          # debug logger: record every status/page transition of every job (kiosk.log)
+          $dbgSnap = "status=[$($j.JobStatus)] pages=$($j.TotalPages) size=$($j.Size)"
+          if ($script:pgDbg[$key] -ne $dbgSnap) { $script:pgDbg[$key] = $dbgSnap; Log "print job [$key] '$($j.DocumentName)' $dbgSnap" }
           if ($script:pgSeen.ContainsKey($key)) { continue }
           # Hold a job the moment it is done spooling - not while JobStatus is empty (a brand-new
           # job the spooler has not stamped yet) or says Spooling. Suspending mid-spool freezes
@@ -1450,6 +1476,7 @@ if ($script:pgOn) {
           try { Suspend-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue } catch {}
           # re-read now that the job is held - some drivers finish counting pages late
           try { $j2 = Get-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue; if ($j2 -and [int]$j2.TotalPages -gt $pages) { $pages = [int]$j2.TotalPages } } catch {}
+          Log "print job [$key] HELD for confirm (pages=$pages)"
           [void]$new.Add(@{ Pn = $pn; Id = $j.Id; Doc = "$($j.DocumentName)"; Pages = $pages })
         }
       }
@@ -1459,6 +1486,7 @@ if ($script:pgOn) {
         else { try { Remove-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print CANCELLED: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print remove err: $($_.Exception.Message)" } }
       }
       foreach ($k in @($script:pgSeen.Keys)) { if (-not $cur.ContainsKey($k)) { $script:pgSeen.Remove($k) } }
+      foreach ($k in @($script:pgDbg.Keys))  { if (-not $cur.ContainsKey($k)) { $script:pgDbg.Remove($k); Log "print job [$k] left the queue" } }
     } catch { Log "print gate err: $($_.Exception.Message)" }
     $script:pgBusy = $false
   })
