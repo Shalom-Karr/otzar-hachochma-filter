@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.15'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.16'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -750,6 +750,34 @@ try {
   $brp = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '(?i)\\Brother\\' -or $_.ProcessName -match '(?i)^br|brother|HttpToUsb' } | Select-Object -ExpandProperty ProcessName -Unique)
   Log ("diag: brother processes -> " + $(if ($brp) { $brp -join ', ' } else { 'NONE' }))
 } catch { Log "diag err: $($_.Exception.Message)" }
+# --- set the real printer as THIS SESSION's default + warm its capabilities ---
+# The custom shell replaced explorer, so nothing set the per-user default or initialized the
+# printer's DEVMODE - that is why the log shows the Brother IsValid=False/paperSizes=0 and Edge
+# previews "0 pages". Do it here, in the kiosk user's own context, where it actually sticks.
+# Give the IPP-over-USB bridge a moment to come up first.
+try {
+  Start-Sleep -Milliseconds 1500
+  Add-Type -AssemblyName System.Drawing
+  $phys = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+    $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
+    $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)'
+  } | Select-Object -First 1)
+  if ($phys) {
+    try { (New-Object -ComObject WScript.Network).SetDefaultPrinter($phys.Name); Log "session default printer -> '$($phys.Name)'" } catch { Log "SetDefaultPrinter failed: $($_.Exception.Message)" }
+    # warm capabilities up to ~15s: reading PaperSizes forces the driver to fetch/cache its DEVMODE.
+    $ok = $false
+    for ($try = 1; $try -le 8 -and -not $ok; $try++) {
+      try {
+        $ps = New-Object System.Drawing.Printing.PrinterSettings; $ps.PrinterName = $phys.Name
+        $pc = 0; try { $pc = $ps.PaperSizes.Count } catch {}
+        Log "diag: warm try $try -> '$($phys.Name)' IsValid=$($ps.IsValid) paperSizes=$pc"
+        if ($ps.IsValid -and $pc -gt 0) { $ok = $true; break }
+      } catch { Log "diag: warm try $try err: $($_.Exception.Message)" }
+      Start-Sleep -Milliseconds 1500
+    }
+    if (-not $ok) { Log "diag: WARNING '$($phys.Name)' still reports no paper sizes after warm-up (driver/bridge capability query failing in this session)" }
+  } else { Log "diag: no physical printer to default/warm" }
+} catch { Log "session-printer setup err: $($_.Exception.Message)" }
 # --- block the Windows key (kills Win+A Quick Settings, Win+I, Win+X, Start, etc.) ---
 # A low-level keyboard hook is the only reliable way with a custom shell; the NoWinKeys policy does not
 # apply because Explorer is not the shell. This CANNOT block Ctrl+Alt+Del, so the admin hatch still works.
