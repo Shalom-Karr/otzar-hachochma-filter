@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.12'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.13'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -680,7 +680,16 @@ $rc.L = 0; $rc.T = 0; $rc.R = $scr.Width; $rc.B = $scr.Height - $barH
 $LogDir = "C:\Users\Public\Documents\OtzarKiosk"
 try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch {}
 function Log($m) { try { Add-Content -LiteralPath "$LogDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {} }
+# verbose debugger.log: keystrokes + fine-grained events. Rolls over at ~2 MB so it can't fill the disk.
+function Dbg($m) {
+  try {
+    $p = "$LogDir\debugger.log"
+    if ((Test-Path $p) -and ((Get-Item $p).Length -gt 2MB)) { Remove-Item "$p.1" -ErrorAction SilentlyContinue; Rename-Item $p "$p.1" -Force -ErrorAction SilentlyContinue }
+    Add-Content -LiteralPath $p -Value ("{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $m)
+  } catch {}
+}
 Log "launcher started"
+Dbg "===== debugger started (pid $PID) ====="
 # --- start printer-vendor support processes (normally started by explorer via the Run keys). ---
 # The kiosk shell REPLACES explorer, so Run-key programs never start in this session. Brother's
 # HttpToUsbBridge.exe carries IPP-over-USB between Windows and a USB Brother - without it the
@@ -718,6 +727,29 @@ try {
     } catch { Log "printer support FAILED to start ($exe): $($_.Exception.Message)" }
   }
 } catch { Log "printer support scan err: $($_.Exception.Message)" }
+# --- print diagnostics (runs AS the kiosk user, where printing actually fails) ---
+try {
+  # 1) are the Edge policies from the user hive visible in THIS session?
+  $ep = 'HKCU:\Software\Policies\Microsoft\Edge'
+  $blCount = 0; $denyPdf = 'no'
+  if (Test-Path "$ep\URLBlocklist") { $blCount = ((Get-ItemProperty "$ep\URLBlocklist").PSObject.Properties | Where-Object { $_.Name -match '^\d+$' }).Count }
+  if (Test-Path "$ep\PrinterTypeDenyList") { $denyPdf = [string](Get-ItemProperty "$ep\PrinterTypeDenyList" -ErrorAction SilentlyContinue).1 }
+  Log "diag: Edge policies in session -> URLBlocklist entries=$blCount PrinterTypeDenyList[1]='$denyPdf'"
+  # 2) can THIS session read each printer's capabilities? (same query Edge's preview makes)
+  Add-Type -AssemblyName System.Drawing
+  foreach ($pn in @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)) {
+    try {
+      $ps = New-Object System.Drawing.Printing.PrinterSettings
+      $ps.PrinterName = $pn
+      $paperCount = -1; try { $paperCount = $ps.PaperSizes.Count } catch { $paperCount = -2 }
+      $res = -1; try { $res = $ps.PrinterResolutions.Count } catch { $res = -2 }
+      Log "diag: printer '$pn' IsValid=$($ps.IsValid) IsDefault=$($ps.IsDefaultPrinter) paperSizes=$paperCount resolutions=$res"
+    } catch { Log "diag: printer '$pn' capability query FAILED: $($_.Exception.Message)" }
+  }
+  # 3) which Brother processes are alive in this session?
+  $brp = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '(?i)\\Brother\\' -or $_.ProcessName -match '(?i)^br|brother|HttpToUsb' } | Select-Object -ExpandProperty ProcessName -Unique)
+  Log ("diag: brother processes -> " + $(if ($brp) { $brp -join ', ' } else { 'NONE' }))
+} catch { Log "diag err: $($_.Exception.Message)" }
 # --- block the Windows key (kills Win+A Quick Settings, Win+I, Win+X, Start, etc.) ---
 # A low-level keyboard hook is the only reliable way with a custom shell; the NoWinKeys policy does not
 # apply because Explorer is not the shell. This CANNOT block Ctrl+Alt+Del, so the admin hatch still works.
@@ -732,11 +764,17 @@ public class KHook {
   [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string lpModuleName);
 }
 "@
+  # thread-safe keystroke buffer; the hook only enqueues (fast), a timer flushes to debugger.log
+  $script:kbBuf = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
   $script:khProc = [KHook+Proc]{
     param($nCode, $wParam, $lParam)
     try {
       if ($nCode -ge 0) {
         $vk = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam)   # vkCode = first field of KBDLLHOOKSTRUCT
+        $w = $wParam.ToInt32()
+        if ($w -eq 0x100 -or $w -eq 0x104) {   # WM_KEYDOWN / WM_SYSKEYDOWN
+          [void]$script:kbBuf.Add(("{0:HH:mm:ss.fff} vk=0x{1:X2} ({2})" -f (Get-Date), $vk, $vk))
+        }
         if ($vk -eq 0x5B -or $vk -eq 0x5C) { return [IntPtr]1 }              # swallow Left/Right Windows key
       }
     } catch {}
@@ -745,6 +783,18 @@ public class KHook {
   $script:khHook = [KHook]::SetWindowsHookEx(13, $script:khProc, [KHook]::GetModuleHandle($null), 0)   # WH_KEYBOARD_LL = 13
   if ($script:khHook -eq [IntPtr]::Zero) { Log "WARN: Windows-key hook NOT installed" } else { Log "Windows-key blocked (low-level keyboard hook installed)" }
 } catch { Log "keyboard hook error: $($_.Exception.Message)" }
+# flush buffered keystrokes to debugger.log (keeps file I/O out of the hook callback)
+try {
+  $kbTmr = New-Object System.Windows.Forms.Timer
+  $kbTmr.Interval = 1000
+  $kbTmr.Add_Tick({
+    if ($script:kbBuf -and $script:kbBuf.Count) {
+      $snap = @($script:kbBuf.ToArray()); $script:kbBuf.Clear()
+      foreach ($e in $snap) { Dbg ("KEY " + $e) }
+    }
+  })
+  $kbTmr.Start()
+} catch { Log "keystroke-flush timer error: $($_.Exception.Message)" }
 $colBg   = [System.Drawing.Color]::FromArgb(244,239,227)
 $colTile = [System.Drawing.Color]::FromArgb(255,253,248)
 

@@ -50,10 +50,28 @@ function Invoke-KioskReport {
     Write-Host "`n===== PRINTERS (kiosk needs a REAL one or Edge shows '0 pages') =====" -ForegroundColor Cyan
     try {
         Get-Printer -ErrorAction SilentlyContinue | ForEach-Object {
-            "  $($_.Name)  [driver: $($_.DriverName); port: $($_.PortName); status: $($_.PrinterStatus)]"
+            "  $($_.Name)  [driver: $($_.DriverName); port: $($_.PortName); status: $($_.PrinterStatus); type: $($_.Type)]"
         }
         $dflt = (Get-CimInstance Win32_Printer -Filter "Default=TRUE" -ErrorAction SilentlyContinue).Name
         "  default (this admin account): $dflt"
+        Write-Host "`n  -- installed print drivers --"
+        Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { "  $($_.Name)  [$($_.MajorVersion); $($_.PrinterEnvironment)]" }
+        Write-Host "`n  -- printer-vendor UWP/Appx packages (ALL users; PSA apps carry driver capabilities) --"
+        Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)brother|xerox|canon|epson|lexmark|print' } | ForEach-Object {
+            $stat = ($_.PackageUserInformation | ForEach-Object { "$($_.UserSecurityId.Sid):$($_.InstallState)" }) -join ' '
+            "  $($_.Name)  [$stat]"
+        }
+        Write-Host "`n  -- print/device services --"
+        Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)spool|print|ipp|usb|device' } | ForEach-Object { "  $($_.Name) = $($_.Status) ($($_.StartType))" }
+        Write-Host "`n  -- Brother scheduled tasks --"
+        Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match '(?i)brother' -or $_.TaskPath -match '(?i)brother' } | ForEach-Object { "  $($_.TaskPath)$($_.TaskName) = $($_.State)" }
+        Write-Host "`n  -- Brother exe ACL spot-check (is the kiosk user still denied?) --"
+        foreach ($bx in "${env:ProgramFiles(x86)}\Brother","$env:ProgramFiles\Brother") {
+            Get-ChildItem $bx -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object {
+                $acl = (icacls $_.FullName 2>$null | Out-String)
+                if ($acl -match [regex]::Escape($OtzarUser)) { "  $($_.FullName)  <- HAS an ACE for $OtzarUser`: $((($acl -split "`n") | Where-Object { $_ -match [regex]::Escape($OtzarUser) }) -join ' | ')" }
+            }
+        }
     } catch { "  printer query failed: $($_.Exception.Message)" }
 
     Write-Host "`n===== PROFILES (duplicate = the bug) =====" -ForegroundColor Cyan
