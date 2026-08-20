@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.17'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.18'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -767,6 +767,23 @@ try {
   # 3) which Brother processes are alive in this session?
   $brp = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '(?i)\\Brother\\' -or $_.ProcessName -match '(?i)^br|brother|HttpToUsb' } | Select-Object -ExpandProperty ProcessName -Unique)
   Log ("diag: brother processes -> " + $(if ($brp) { $brp -join ', ' } else { 'NONE' }))
+  # 4) this session's HTTP proxy (a content filter here would block the IPP-over-USB localhost query)
+  try {
+    $wi = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    Log "diag: WinINET ProxyEnable=$($wi.ProxyEnable) ProxyServer='$($wi.ProxyServer)' AutoConfigURL='$($wi.AutoConfigURL)'"
+  } catch {}
+  # 5) which local HTTP port the Brother bridge listens on, and can THIS session reach it?
+  try {
+    $brproc = Get-Process HttpToUsbBridge -ErrorAction SilentlyContinue
+    if ($brproc) {
+      $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $brproc.Id -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort -Unique)
+      Log ("diag: bridge listening ports -> " + $(if ($ports) { $ports -join ', ' } else { 'NONE' }))
+      foreach ($pt in $ports) {
+        try { $r = Invoke-WebRequest -Uri "http://localhost:$pt/" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop; Log "diag: localhost:$pt reachable (HTTP $($r.StatusCode))" }
+        catch { Log "diag: localhost:$pt query -> $($_.Exception.Message)" }
+      }
+    }
+  } catch { Log "diag: bridge-port probe err: $($_.Exception.Message)" }
 } catch { Log "diag err: $($_.Exception.Message)" }
 # --- set the real printer as THIS SESSION's default + warm its capabilities ---
 # The custom shell replaced explorer, so nothing set the per-user default or initialized the
@@ -2222,8 +2239,29 @@ if (-not $Undo) {
         DL "`n----- PRINTERS -----"
         Get-Printer -ErrorAction SilentlyContinue | ForEach-Object { DL "  $($_.Name)  [driver=$($_.DriverName); port=$($_.PortName); status=$($_.PrinterStatus); type=$($_.Type)]" }
         DL "  default (this admin session): $((Get-CimInstance Win32_Printer -Filter 'Default=TRUE' -ErrorAction SilentlyContinue).Name)"
+        DL "`n  ADMIN-side capability query (compare vs the 'diag:' lines in kiosk.log = Otzar session):"
+        try {
+            Add-Type -AssemblyName System.Drawing
+            foreach ($pn in @(Get-Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)) {
+                try { $ps = New-Object System.Drawing.Printing.PrinterSettings; $ps.PrinterName = $pn
+                    $pc = 0; try { $pc = $ps.PaperSizes.Count } catch {}
+                    DL "    '$pn' IsValid=$($ps.IsValid) paperSizes=$pc" } catch { DL "    '$pn' query FAILED: $($_.Exception.Message)" }
+            }
+        } catch { DL "    capability query error: $($_.Exception.Message)" }
         DL "`n  installed drivers:"
         Get-PrinterDriver -ErrorAction SilentlyContinue | ForEach-Object { DL "    $($_.Name)" }
+
+        DL "`n----- HTTP PROXY / CONTENT FILTER (IPP-over-USB Brother queries localhost via HTTP) -----"
+        try {
+            $wi = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+            DL "  WinINET ProxyEnable=$($wi.ProxyEnable) ProxyServer='$($wi.ProxyServer)' AutoConfigURL='$($wi.AutoConfigURL)'"
+            $wh = (netsh winhttp show proxy 2>$null | Out-String).Trim()
+            DL ("  WinHTTP: " + ($wh -replace "`r?`n", ' | '))
+        } catch { DL "  proxy read err: $($_.Exception.Message)" }
+        foreach ($cf in 'Netfree','Rimon','netspark','Nativ','Etrog') {
+            $svc = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "(?i)$cf" -or $_.DisplayName -match "(?i)$cf" }
+            if ($svc) { $svc | ForEach-Object { DL "  content-filter service: $($_.Name) = $($_.Status)" } }
+        }
 
         DL "`n----- PRINT / USB / DEVICE SERVICES -----"
         Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)spool|print|ipp|usb|LxpsSvc|device' } | ForEach-Object { DL "  $($_.Name) = $($_.Status) ($($_.StartType))" }
