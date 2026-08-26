@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.21'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.22'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -447,6 +447,36 @@ if (-not $Undo) {
         Start-Sleep 2
         Write-Host "  print queues cleared ($stale stale job(s) removed) and spooler restarted." -ForegroundColor Green
     } catch { Write-Host "  queue cleanup: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# ---------------- 3d. speed up the capability query: disable bidirectional support ----------------
+# With bidi ON, Windows LIVE-queries the device for its capabilities every time - on the USB
+# IPP-over-USB Brother that takes ~90s the first time, so Edge's preview gives up and shows
+# "0 pages". Clearing the ENABLE_BIDI attribute (= unchecking "Enable bidirectional support" on the
+# Ports tab) makes Windows use the driver's STATIC capability list instead: instant, and printing
+# is unaffected (bidi only carries status/ink info). Applied to every real (non-virtual) printer.
+if (-not $Undo) {
+    try {
+        $BIDI = 0x00000800   # PRINTER_ATTRIBUTE_ENABLE_BIDI
+        $realPrn = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+            $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
+            $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)'
+        })
+        $changed = 0
+        foreach ($rp in $realPrn) {
+            $pk = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\$($rp.Name)"
+            if (Test-Path -LiteralPath $pk) {
+                $attr = (Get-ItemProperty -LiteralPath $pk -Name Attributes -ErrorAction SilentlyContinue).Attributes
+                if (($null -ne $attr) -and (($attr -band $BIDI) -ne 0)) {
+                    Set-ItemProperty -LiteralPath $pk -Name Attributes -Value ($attr -band (-bnot $BIDI))
+                    $changed++
+                    Slog "  disabled bidirectional support on '$($rp.Name)' (fast capability query -> no '0 pages' wait)" "Green"
+                }
+            }
+        }
+        if ($changed) { Restart-Service Spooler -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
+        else { Write-Host "  bidirectional support already off on all real printers." -ForegroundColor DarkGray }
+    } catch { Write-Host "  bidi disable error: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
