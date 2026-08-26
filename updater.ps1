@@ -56,29 +56,33 @@ function Invoke-OtzarSelfUpdate {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Ulog "installed version: v$current"
 
-    # latest version: read the tiny /version endpoint on GitHub Pages (a few bytes of plain text).
-    # The whole CHECK is capped at ${checkBudget}s; if it can't finish we install the current copy as-is.
+    # latest version: query SEVERAL sources and take the HIGHEST version any of them reports.
+    # Why not just one: the raw setup.ps1 is CDN-cached for minutes and lags behind, while the tiny
+    # raw /version FILE and Pages /version propagate fast. Reading only the stale source made the
+    # updater wrongly conclude "up to date". Taking the max means a stale source can never mask a
+    # fresh one. The whole CHECK is capped at ${checkBudget}s; if none answer we install as-is.
     $pagesSite = "https://$($OtzarRepoOwner.ToLower()).github.io/$OtzarRepoName"
-    $remote    = $null
-    $verUrl    = "$pagesSite/version?nocache=$([guid]::NewGuid())"
-    try {
-        $t1 = [int][math]::Max(5, $checkBudget - $sw.Elapsed.TotalSeconds)
-        Ulog "checking online version at /version (timeout ${t1}s)"
-        $txt = (Invoke-WebRequest -Uri $verUrl -UseBasicParsing -TimeoutSec $t1 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
-        $vm = [regex]::Match([string]$txt, '([0-9]+\.[0-9]+\.[0-9]+)')
-        if ($vm.Success) { $remote = [version]$vm.Groups[1].Value }
-    } catch { Ulog "/version check failed: $($_.Exception.Message)" }
-
-    if (($null -eq $remote) -and ($sw.Elapsed.TotalSeconds -lt $checkBudget)) {
-        # fallback: parse $KioskVersion out of the remote setup.ps1
-        $rawUrl = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch/setup.ps1?nocache=$([guid]::NewGuid())"
+    $rawBase   = "https://raw.githubusercontent.com/$OtzarRepoOwner/$OtzarRepoName/$OtzarRepoBranch"
+    $verRx     = '([0-9]+\.[0-9]+\.[0-9]+)'
+    $sources = @(
+        @{ name = 'raw /version';   url = "$rawBase/version";   rx = $verRx },      # tiny + fast-propagating (most reliable)
+        @{ name = 'Pages /version'; url = "$pagesSite/version"; rx = $verRx },
+        @{ name = 'raw setup.ps1';  url = "$rawBase/setup.ps1"; rx = $verRegex }     # last resort (slow-cached)
+    )
+    $remote = $null
+    foreach ($s in $sources) {
+        if ($sw.Elapsed.TotalSeconds -ge $checkBudget) { break }
+        $t = [int][math]::Max(5, $checkBudget - $sw.Elapsed.TotalSeconds)
         try {
-            $t2 = [int][math]::Max(5, $checkBudget - $sw.Elapsed.TotalSeconds)
-            Ulog "falling back to raw setup.ps1 (timeout ${t2}s)"
-            $remoteText = (Invoke-WebRequest -Uri $rawUrl -UseBasicParsing -TimeoutSec $t2 -Headers @{ 'Cache-Control' = 'no-cache' }).Content
-            $rm = [regex]::Match($remoteText, $verRegex)
-            if ($rm.Success) { $remote = [version]$rm.Groups[1].Value }
-        } catch { Ulog "setup.ps1 fallback failed: $($_.Exception.Message)" }
+            Ulog "checking $($s.name) (timeout ${t}s)"
+            $txt = (Invoke-WebRequest -Uri ("$($s.url)?nocache=$([guid]::NewGuid())") -UseBasicParsing -TimeoutSec $t -Headers @{ 'Cache-Control' = 'no-cache' }).Content
+            $m = [regex]::Match([string]$txt, $s.rx)
+            if ($m.Success) {
+                $v = [version]$m.Groups[1].Value
+                Ulog "  $($s.name) -> v$v"
+                if (($null -eq $remote) -or ($v -gt $remote)) { $remote = $v }
+            }
+        } catch { Ulog "  $($s.name) check failed: $($_.Exception.Message)" }
     }
 
     if ($null -eq $remote) {

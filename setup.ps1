@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.19'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.20'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
