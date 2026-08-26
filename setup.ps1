@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.18'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.19'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -552,6 +552,15 @@ if ($LASTEXITCODE -ne 0) {
         # hide Edge's built-in "Save as PDF" print destination - on a kiosk it silently "prints"
         # nothing physical and never reaches the print gate. Real printers are unaffected.
         reg add "HKU\LockAll\Software\Policies\Microsoft\Edge\PrinterTypeDenyList" /v 1 /t REG_SZ /d "pdf" /f | Out-Null
+        # Make sure loopback traffic bypasses any HTTP proxy / content filter (Netfree/Rimon) for this
+        # user. The USB Brother's "Microsoft IPP Class Driver" reads its capabilities by querying the
+        # HttpToUsbBridge over http://localhost:<port> - if a filter proxy intercepts that, the printer
+        # reports 0 paper sizes and Edge previews "0 pages". Admins are usually filter-exempt (why it
+        # works there). ProxyOverride adds the loopback bypass; harmless when no proxy is set.
+        $isk = "HKU\LockAll\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        $curOv = ''
+        try { $curOv = (reg query $isk /v ProxyOverride 2>$null | Select-String 'ProxyOverride').ToString() } catch {}
+        if ($curOv -notmatch '127\.0\.0\.1') { reg add $isk /v ProxyOverride /t REG_SZ /d "localhost;127.0.0.1;<local>" /f | Out-Null }
         # make the machine's REAL printer (USB or network - auto-detected, no parameters) the
         # kiosk user's default, and stop Windows moving the default around. Virtual queues
         # (Print to PDF / OneNote / XPS / fax / PDF converters) are skipped.
@@ -1670,9 +1679,14 @@ if ($script:pgOn) {
         foreach ($j in $jobs) {
           $key = "$pn|$($j.Id)"; $cur[$key] = $true
           # debug logger: record every status/page transition of every job (kiosk.log)
-          $dbgSnap = "status=[$($j.JobStatus)] pages=$($j.TotalPages) size=$($j.Size)"
+          $ju = ''; try { $ju = [string]$j.UserName } catch {}
+          $dbgSnap = "status=[$($j.JobStatus)] pages=$($j.TotalPages) size=$($j.Size) user=$ju"
           if ($script:pgDbg[$key] -ne $dbgSnap) { $script:pgDbg[$key] = $dbgSnap; Log "print job [$key] '$($j.DocumentName)' $dbgSnap" }
           if ($script:pgSeen.ContainsKey($key)) { continue }
+          # The spooler is machine-wide: this watcher sees jobs from EVERY user/session (e.g. the
+          # admin account). Only gate THIS kiosk user's own jobs - never suspend another user's
+          # print job or the popup shows in the wrong session and the other user's print hangs.
+          if ($ju -ne '' -and ($ju -notmatch ('(^|\\)' + [regex]::Escape($env:USERNAME) + '$'))) { $script:pgSeen[$key] = $true; continue }
           # Hold a job the moment it is done spooling - not while JobStatus is empty (a brand-new
           # job the spooler has not stamped yet) or says Spooling. Suspending mid-spool freezes
           # the sending app ("Waiting for printer connection...") and reads a half-counted page
