@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.20'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.21'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -717,6 +717,15 @@ try {
     if ($sf -and (Test-Path $sf)) { Get-ChildItem $sf -File -ErrorAction SilentlyContinue | ForEach-Object { Log "explorer-would-run: [Startup] $($_.Name)" } }
   }
 } catch { Log "startup-audit err: $($_.Exception.Message)" }
+# --- ALL printer setup + diagnostics run on a FIRE-AND-FORGET background thread ---
+# CRITICAL: reading a printer's capabilities (PaperSizes) can BLOCK INDEFINITELY on the IPP-over-USB
+# Brother (the driver waits on an HTTP query to the bridge that may never answer). Doing this on the
+# UI startup thread froze the shell before the desktop drew -> BLACK SCREEN + relaunch loop. It now
+# runs in an in-process runspace; if it hangs, only that thread hangs and the desktop still appears.
+# A Log() defined inside the block writes to kiosk.log, so the code below needs no other changes.
+$printBg = {
+  param($logDir)
+  function Log($m) { try { Add-Content -LiteralPath "$logDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {} }
 # --- start printer-vendor support processes (normally started by explorer via the Run keys). ---
 # The kiosk shell REPLACES explorer, so Run-key programs never start in this session. Brother's
 # HttpToUsbBridge.exe carries IPP-over-USB between Windows and a USB Brother - without it the
@@ -822,6 +831,16 @@ try {
     if (-not $ok) { Log "diag: WARNING '$($phys.Name)' still reports no paper sizes after warm-up (driver/bridge capability query failing in this session)" }
   } else { Log "diag: no physical printer to default/warm" }
 } catch { Log "session-printer setup err: $($_.Exception.Message)" }
+}
+# launch the printer block on a background runspace (in-process; no blocked exe spawned) and DO NOT wait
+try {
+  $rsPrint = [runspacefactory]::CreateRunspace()
+  $rsPrint.ApartmentState = 'STA'; $rsPrint.ThreadOptions = 'ReuseThread'; $rsPrint.Open()
+  $psPrint = [PowerShell]::Create(); $psPrint.Runspace = $rsPrint
+  [void]$psPrint.AddScript($printBg).AddArgument($LogDir)
+  [void]$psPrint.BeginInvoke()   # FIRE AND FORGET - a hung printer query can never freeze the desktop
+  Log "printer setup + diagnostics launched on background thread"
+} catch { Log "printer bg launch err: $($_.Exception.Message)" }
 # --- block the Windows key (kills Win+A Quick Settings, Win+I, Win+X, Start, etc.) ---
 # A low-level keyboard hook is the only reliable way with a custom shell; the NoWinKeys policy does not
 # apply because Explorer is not the shell. This CANNOT block Ctrl+Alt+Del, so the admin hatch still works.
