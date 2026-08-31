@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.22'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.23'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -859,6 +859,28 @@ try {
       Start-Sleep -Milliseconds 1500
     }
     if (-not $ok) { Log "diag: WARNING '$($phys.Name)' still reports no paper sizes after warm-up (driver/bridge capability query failing in this session)" }
+    # --- SELF-TEST (zero paper): will EDGE show the page count? ---
+    # The original bug was Edge's preview showing "0 pages". Edge is a SEPARATE process; the warm-up
+    # above cached capabilities in THIS process. So spawn a fresh copy of the kiosk exe (an allowed
+    # program) and have it read the printer's PaperSizes COLD, the same call Edge's preview makes. If
+    # a fresh process gets paperSizes>0 quickly, Edge will show the count too. No print job, no paper.
+    try {
+      $selfExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+      $pname = $phys.Name.Replace("'", "''")
+      $probeFile = Join-Path $env:TEMP 'kiosk-caps-probe.ps1'
+      $nl = [Environment]::NewLine
+      $probeBody =
+        "Add-Type -AssemblyName System.Drawing" + $nl +
+        "`$sw=[System.Diagnostics.Stopwatch]::StartNew()" + $nl +
+        "`$ps=New-Object System.Drawing.Printing.PrinterSettings; `$ps.PrinterName='$pname'" + $nl +
+        "`$pc=0; try{`$pc=`$ps.PaperSizes.Count}catch{}" + $nl +
+        "`$v=`$ps.IsValid; `$ms=`$sw.ElapsedMilliseconds" + $nl +
+        "`$verdict= if(`$v -and `$pc -gt 0){'PASS - a fresh process (like Edge) sees the page count; Edge preview will work'}else{'FAIL - a fresh process sees 0; Edge would show 0 pages'}" + $nl +
+        "Add-Content -LiteralPath '$logDir\kiosk.log' -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  SELFTEST-CAPS: fresh process read the printer IsValid=' + `$v + ' paperSizes=' + `$pc + ' in ' + `$ms + 'ms -> ' + `$verdict)"
+      Set-Content -LiteralPath $probeFile -Value $probeBody -Encoding UTF8
+      Start-Process -FilePath $selfExe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$probeFile -WindowStyle Hidden
+      Log "SELFTEST-CAPS: launched a fresh process to verify an Edge-style capability read (result logs shortly)"
+    } catch { Log "SELFTEST-CAPS launch err: $($_.Exception.Message)" }
   } else { Log "diag: no physical printer to default/warm" }
 } catch { Log "session-printer setup err: $($_.Exception.Message)" }
 }
