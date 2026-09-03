@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.27'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.28'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -285,11 +285,17 @@ Get-ChildItem 'D:\' -Recurse -Depth 3 -Filter *.exe -ErrorAction SilentlyContinu
 foreach ($cd in @('D:\Chrome')) { if ((Test-Path -LiteralPath $cd) -and ($deny -notcontains $cd)) { $deny += $cd } }
 Slog "Scanned D:\ - blocking $dCount exe(s) on the books drive + the Chrome folder; Otzar launcher stays allowed." "DarkGray"
 
-# Block File Explorer + the Settings app for the user (tested: the explorer.exe deny was NOT the cause
-# of the env-var error, so it's safe to keep it blocked). The kiosk shell + policies also remove any
-# way to OPEN a File Explorer window.
-$extra = @("$env:windir\explorer.exe", "$env:windir\SysWOW64\explorer.exe", "$env:windir\ImmersiveControlPanel\SystemSettings.exe")
+# Block the Settings app for the user. NOTE: explorer.exe is deliberately NOT blocked here anymore.
+# Diagnosis (dx.ps1) proved the Brother/print capability query is fast (~2s) as the Otzar USER in a
+# session that has explorer, but ~60s in Otzar's real kiosk session where explorer.exe is denied - the
+# modern print stack activates shell/COM broker services that need explorer to be runnable, and the
+# NTFS deny made those activations time out. explorer is kept from being the shell by the Winlogon
+# Shell value (= kioskbar) + NoRun/NoControlPanel etc., so allowing it to EXECUTE does not give the
+# patron a file window. The Settings app stays blocked.
+$extra = @("$env:windir\ImmersiveControlPanel\SystemSettings.exe")
 foreach ($e in $extra) { if ((Test-Path $e) -and ($deny -notcontains $e)) { $deny += $e } }
+# actively clear any explorer.exe deny left by earlier versions (so the print stack works again)
+$deny = @($deny | Where-Object { $_ -notmatch '(?i)\\explorer\.exe$' })
 
 # Otzar (Electron) spawns cmd.exe at startup - it MUST be allowed, so pull it back out of the deny list
 # even if a Start Menu shortcut pointed at it. The kiosk shell + policies still block the user from opening it.
@@ -321,6 +327,10 @@ if (-not $Undo) {
             ForEach-Object { Set-ExeDeny $_.FullName $false; $healed++ }
     }
     Slog "  printer-vendor exes UN-blocked (support software must run to print): $healed" "Green"
+    # heal explorer.exe: earlier versions execute-denied it, which made the print-capability query
+    # take ~60s in the shell-less kiosk session ("0 pages" in Edge). Clear that deny.
+    foreach ($ex in "$env:windir\explorer.exe","$env:windir\SysWOW64\explorer.exe") { if (Test-Path $ex) { Set-ExeDeny $ex $false } }
+    Slog "  explorer.exe UN-blocked (print stack needs it runnable; kiosk shell stays kioskbar via the Winlogon Shell value)" "Green"
 }
 Write-Host "  done ($($deny.Count) items)." -ForegroundColor Green
 
