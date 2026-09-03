@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.29'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.30'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -539,6 +539,38 @@ if (-not $Undo) {
         }
         if ($tset) { Restart-Service Spooler -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
     } catch { Write-Host "  IPP timeout set err: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# ---------------- 3g. prefer a REAL (v3) OEM driver over the modern IPP Class Driver ----------------
+# ROOT CAUSE (proven via dx.ps1 + ProcMon): the "Microsoft IPP Class Driver" is a MODERN/v4 driver.
+# Its capability query blocks ~10-14s per call waiting on shell/COM broker services that the kiosk's
+# custom-shell session does not have (a normal session's explorer provides them), so Edge's print
+# preview hangs ~60s and shows "0 pages". A classic v3 OEM driver reads capabilities from a LOCAL file
+# synchronously - fast in ANY session. If the OEM v3 driver is installed (download the Brother "Full
+# Driver & Software Package" once on this admin account), switch the queue to it.
+if (-not $Undo) {
+    try {
+        $phys = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+            $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
+            $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)' } | Select-Object -First 1)
+        if ($phys) {
+            if ($phys.DriverName -match 'IPP Class Driver|Universal Print Class|Microsoft.*Class Driver') {
+                $brand = ($phys.Name -split ' ')[0]
+                $v3 = @(Get-PrinterDriver -ErrorAction SilentlyContinue | Where-Object {
+                    $_.Name -like "$brand*" -and $_.Name -notmatch 'Class Driver|IPP|Universal|^Microsoft' -and $_.Name -notlike '*Fax*' } | Select-Object -First 1)
+                if ($v3) {
+                    Set-Printer -Name $phys.Name -DriverName $v3.Name -ErrorAction Stop
+                    Restart-Service Spooler -Force -ErrorAction SilentlyContinue; Start-Sleep 2
+                    Slog "  '$($phys.Name)': switched from the modern IPP driver to v3 driver '$($v3.Name)' (fast capability query in the kiosk session)" "Green"
+                } else {
+                    Slog "  '$($phys.Name)' uses the modern 'Microsoft IPP Class Driver' - this is what makes Edge hang ~60s / show '0 pages' in the kiosk session." "Yellow"
+                    Slog "  FIX: on THIS admin account, install the OEM driver (Brother 'Full Driver & Software Package' for $($phys.Name)) from the manufacturer's site, then re-run setup.ps1 - it will switch the queue automatically." "Yellow"
+                }
+            } else {
+                Write-Host "  '$($phys.Name)' already uses a real v3 driver ($($phys.DriverName)) - good." -ForegroundColor DarkGray
+            }
+        }
+    } catch { Write-Host "  driver-switch err: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
