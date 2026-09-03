@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.25'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.26'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -502,6 +502,35 @@ if (-not $Undo) {
     }
 }
 
+# ---------------- 3f. Windows Protected Print Mode + IPP timeouts (THE 60s cause) ----------------
+# printdiag.log PROVED it: in the locked Otzar session the capability query does a LIVE IPP lookup
+# that waits out the Brother's dnsTimeout(15s)+txTimeout(45s) = ~60s before falling back to cached
+# data - while admin skips the live query and reads the cache in 256ms. Windows Protected Print Mode
+# forces that modern live path. Turn WPP off (fast classic cached path, like admin) and shrink the
+# per-printer IPP timeouts so any residual live query fails fast instead of hanging ~60s.
+if (-not $Undo) {
+    try {
+        reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Printers\WindowsProtectedPrintGroup" /v WindowsProtectedPrintMode /t REG_DWORD /d 0 /f 2>$null | Out-Null
+        reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print" /v WindowsProtectedPrintMode /t REG_DWORD /d 0 /f 2>$null | Out-Null
+        Slog "  Windows Protected Print Mode -> OFF (reverts to the fast cached-capability path admin uses)" "Green"
+    } catch { Write-Host "  WPP disable err: $($_.Exception.Message)" -ForegroundColor Yellow }
+    try {
+        $tset = 0
+        foreach ($rp in @(Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+            $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
+            $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)' })) {
+            $pk = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\$($rp.Name)"
+            if (Test-Path -LiteralPath $pk) {
+                Set-ItemProperty -LiteralPath $pk -Name txTimeout  -Value 4000 -ErrorAction SilentlyContinue
+                Set-ItemProperty -LiteralPath $pk -Name dnsTimeout -Value 2000 -ErrorAction SilentlyContinue
+                $tset++
+                Slog "  '$($rp.Name)': IPP timeouts cut to txTimeout=4000 dnsTimeout=2000 (a stalled live query now falls back to cache in ~6s, not ~60s)" "Green"
+            }
+        }
+        if ($tset) { Restart-Service Spooler -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
+    } catch { Write-Host "  IPP timeout set err: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
 Slog "Editing the kiosk user hive: policies + launcher shell + writing launcher scripts..." "Cyan"
 $line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
@@ -797,6 +826,8 @@ try {
   try { $anyP=$false; Get-NetTCPConnection -LocalPort 50000 -ErrorAction SilentlyContinue | ForEach-Object { $anyP=$true; $op=$_.OwningProcess; $pr=Get-Process -Id $op -ErrorAction SilentlyContinue; P "port50000 $($_.State) remote=$($_.RemoteAddress):$($_.RemotePort) pid=$op name=$($pr.ProcessName) session=$($pr.SessionId)" }; if (-not $anyP) { P "port50000: nobody listening/connected" } } catch { P "port50000 err: $($_.Exception.Message)" }
   # Brother registry config (attributes, port, devmode presence)
   try { $bk='HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\Brother MFC-J4355DW'; if (Test-Path -LiteralPath $bk) { (Get-ItemProperty -LiteralPath $bk).PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notmatch '^PS' } | ForEach-Object { $v=$_.Value; if ($v -is [byte[]]) { $v = "<$($v.Length) bytes>" }; P "reg[$($_.Name)] = $v" } } else { P "reg: Brother printer key not found" } } catch { P "reg dump err: $($_.Exception.Message)" }
+  # Windows Protected Print Mode state (the thing that forces the slow live IPP query) - confirm it is now OFF
+  try { foreach ($wk in 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\WindowsProtectedPrintGroup','HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print','HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\WPP') { if (Test-Path -LiteralPath $wk) { (Get-ItemProperty -LiteralPath $wk -ErrorAction SilentlyContinue).PSObject.Properties | Where-Object { $_.Name -match '(?i)protect|wpp|modern' } | ForEach-Object { P "WPP $wk :: $($_.Name) = $($_.Value)" } } } } catch { P "WPP dump err: $($_.Exception.Message)" }
   # CAPABILITY TIMING BREAKDOWN - the key measurement: which call eats the ~90s
   Add-Type -AssemblyName System.Drawing
   foreach ($pn in @('Brother MFC-J4355DW','Microsoft Print to PDF')) {
