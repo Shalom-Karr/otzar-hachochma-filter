@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.23'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.24'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -477,6 +477,29 @@ if (-not $Undo) {
         if ($changed) { Restart-Service Spooler -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
         else { Write-Host "  bidirectional support already off on all real printers." -ForegroundColor DarkGray }
     } catch { Write-Host "  bidi disable error: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# ---------------- 3e. modern print-stack services (THE admin-vs-Otzar difference) ----------------
+# diagnostics.log proved it: PrintWorkflowUserSvc is RUNNING in the admin session (so admin's IPP
+# Brother capability query is instant), but in the locked Otzar session that path is down, so the
+# query takes ~95s or fails and Edge shows "0 pages". These per-user services serve capabilities for
+# driverless/IPP printers. Force them to start automatically so they are up in EVERY session,
+# including Otzar - matching the admin conditions that already work.
+if (-not $Undo) {
+    foreach ($svc in 'PrintWorkflowUserSvc','PrintDeviceConfigurationService','PrintNotify','PrintScanBrokerService') {
+        $sk = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+        if (Test-Path -LiteralPath $sk) {
+            try {
+                $st = (Get-ItemProperty -LiteralPath $sk -Name Start -ErrorAction SilentlyContinue).Start
+                if ($st -ne 2) { Set-ItemProperty -LiteralPath $sk -Name Start -Value 2 -ErrorAction Stop   # 2 = Automatic
+                    Slog "  print service '$svc' -> Automatic start (fixes slow/failed IPP capability query in the kiosk session)" "Green" }
+            } catch { Write-Host "  could not set '$svc' start type: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+    }
+    # start them now in THIS (admin) session too; the per-user ones spin up per session at logon
+    foreach ($svc in 'PrintDeviceConfigurationService','PrintNotify','PrintScanBrokerService') {
+        try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch {}
+    }
 }
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
