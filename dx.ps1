@@ -95,9 +95,19 @@ if ($pmOn) {
         Start-Process $pm -ArgumentList "/Terminate" -WindowStyle Hidden -Wait; Start-Sleep 3
         Start-Process $pm -ArgumentList "/OpenLog `"$pml`" /SaveAs `"$pmCsv`"" -WindowStyle Hidden -Wait; Start-Sleep 2
         if (Test-Path $pmCsv) {
-            $rows = Import-Csv $pmCsv -ErrorAction SilentlyContinue
-            $mine = @($rows | Where-Object { $_.PID -eq $otzarPid })
-            if (-not $mine.Count) { $mine = @($rows | Where-Object { $_.'Process Name' -match '(?i)kioskbar|powershell' }) }
+            # The unfiltered CSV can be ~85MB - stream it and keep only the probe PID's rows (+header)
+            # into a small file, so we never Import-Csv the whole thing (that is what looked "frozen").
+            $small = "$pmDir\dx-mine.csv"
+            Say "filtering ProcMon to the probe's own rows (pid $otzarPid)..."
+            $rdr = [System.IO.File]::OpenText($pmCsv); $wtr = New-Object System.IO.StreamWriter($small, $false)
+            $hdr = $null; $pat = '"' + $otzarPid + '"'
+            while ($null -ne ($ln = $rdr.ReadLine())) {
+                if ($null -eq $hdr) { $hdr = $ln; $wtr.WriteLine($ln); continue }
+                if ($ln.Contains($pat)) { $wtr.WriteLine($ln) }
+            }
+            $rdr.Close(); $wtr.Close()
+            $mine = @(Import-Csv $small -ErrorAction SilentlyContinue | Where-Object { $_.PID -eq $otzarPid })
+            Say "  probe rows captured: $($mine.Count)"
             Say "`n--- STALL POINTS: gaps > 2s between the probe's consecutive ops (the op listed is what stalled) ---"
             $prev = $null
             foreach ($row in $mine) {
