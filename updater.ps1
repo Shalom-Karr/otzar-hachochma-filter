@@ -103,34 +103,35 @@ function Invoke-OtzarSelfUpdate {
     $tmpZip = "$tmpDir.zip"
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
-    # Preferred: pull each script straight from GitHub Pages (small files; works where the
-    # github.com zip is blocked/slow). Download to a temp dir first, then copy in all-or-nothing.
-    $files = @('setup.ps1','create.ps1','updater.ps1','uninstall.ps1','diagnostics.ps1','version')
-    $viaPages = $true
+    $files = @('setup.ps1','create.ps1','updater.ps1','uninstall.ps1','diagnostics.ps1','dx.ps1','version')
+    # Primary: the github.com branch ZIP - always current the moment a version is pushed (no Pages
+    # rebuild lag, so no wasted 404s). Fallback: pull each script from GitHub Pages, for networks
+    # where github.com itself is blocked by a content filter but Pages is reachable.
+    $done = $false
     try {
-        foreach ($f in $files) {
-            Ulog "downloading $f from Pages..."
-            Invoke-WebRequest -Uri "$pagesSite/$f?nocache=$([guid]::NewGuid())" `
-                -OutFile (Join-Path $tmpDir $f) -UseBasicParsing -TimeoutSec 60 -Headers @{ 'Cache-Control' = 'no-cache' }
-        }
-    } catch {
-        $viaPages = $false
-        Ulog "Pages download failed ($($_.Exception.Message)); falling back to the github.com zip."
+        Ulog "downloading the github.com zip..."
+        Invoke-WebRequest -Uri "https://github.com/$OtzarRepoOwner/$OtzarRepoName/archive/refs/heads/$OtzarRepoBranch.zip" `
+            -OutFile $tmpZip -UseBasicParsing -TimeoutSec 60
+        Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpDir -Force
+        $inner = Get-ChildItem -LiteralPath $tmpDir -Directory | Select-Object -First 1   # <repo>-<branch>\
+        if (-not $inner) { throw "downloaded archive was empty" }
+        Copy-Item -Path (Join-Path $inner.FullName '*') -Destination $dir -Recurse -Force
+        $done = $true
+    } catch { Ulog "github.com zip failed ($($_.Exception.Message)); falling back to per-file from Pages." }
+
+    if (-not $done) {
+        try {
+            foreach ($f in $files) {
+                Invoke-WebRequest -Uri "$pagesSite/$f?nocache=$([guid]::NewGuid())" `
+                    -OutFile (Join-Path $tmpDir $f) -UseBasicParsing -TimeoutSec 60 -Headers @{ 'Cache-Control' = 'no-cache' }
+            }
+            foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $tmpDir $f) -Destination (Join-Path $dir $f) -Force }
+            $done = $true
+        } catch { Ulog "Pages per-file download also failed ($($_.Exception.Message))." }
     }
 
-    try {
-        if ($viaPages) {
-            foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $tmpDir $f) -Destination (Join-Path $dir $f) -Force }
-        } else {
-            Invoke-WebRequest -Uri "https://github.com/$OtzarRepoOwner/$OtzarRepoName/archive/refs/heads/$OtzarRepoBranch.zip" `
-                -OutFile $tmpZip -UseBasicParsing -TimeoutSec 60
-            Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpDir -Force
-            $inner = Get-ChildItem -LiteralPath $tmpDir -Directory | Select-Object -First 1   # <repo>-<branch>\
-            if (-not $inner) { throw "downloaded archive was empty" }
-            Copy-Item -Path (Join-Path $inner.FullName '*') -Destination $dir -Recurse -Force
-        }
-    } catch {
-        Ulog "auto-update failed ($($_.Exception.Message)); continuing on the current version v$current."
+    if (-not $done) {
+        Ulog "auto-update failed (both github.com zip and Pages); continuing on the current version v$current."
         Remove-Item -LiteralPath $tmpZip, $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
