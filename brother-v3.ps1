@@ -22,12 +22,13 @@ function Good { param($f,$exp) (Test-Path $f) -and ((Get-Item $f).Length -ge ($(
 
 $ok = Good $exe $expected
 if ($ok) { Write-Host "  already downloaded." -ForegroundColor Green }
-for ($try = 1; $try -le 5 -and -not $ok; $try++) {
-    Write-Host "  attempt $try ..." -ForegroundColor DarkGray
+for ($try = 1; $try -le 30 -and -not $ok; $try++) {
+    Write-Host "  attempt $try ... ($(Get-Date -Format 'HH:mm'))" -ForegroundColor DarkGray
     try {
-        # BITS: resumes across the filter dropping the connection; best for flaky networks
+        # BITS: resumes across the filter dropping the connection; best for flaky networks. Very
+        # patient (safe to leave running overnight) - keeps resuming a transient error up to 2h.
         Import-Module BitsTransfer -ErrorAction SilentlyContinue
-        Start-BitsTransfer -Source $url -Destination $exe -ErrorAction Stop -RetryInterval 60 -RetryTimeout 600
+        Start-BitsTransfer -Source $url -Destination $exe -ErrorAction Stop -RetryInterval 60 -RetryTimeout 7200
     } catch {
         Write-Host "    BITS failed ($($_.Exception.Message)); trying a direct download..." -ForegroundColor DarkGray
         try { Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 900 -Headers @{ 'User-Agent'='Mozilla/5.0' } } catch { Write-Host "    direct download failed ($($_.Exception.Message))" -ForegroundColor DarkGray }
