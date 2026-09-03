@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.24'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.25'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -779,6 +779,41 @@ try {
 $printBg = {
   param($logDir)
   function Log($m) { try { Add-Content -LiteralPath "$logDir\kiosk.log" -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) } catch {} }
+# ======================= DEEP PRINT DIAGNOSTIC (verbose) -> printdiag.log =======================
+# Measures WHICH sub-call is slow (IsValid vs PaperSizes vs Resolutions), and captures sessions,
+# every HttpToUsbBridge instance + its session, who owns port 50000, and the Brother's registry
+# config - to find why the SAME query is instant for admin but ~90s/fails in the locked Otzar session.
+$PD = "$logDir\printdiag.log"
+function P($m) { try { Add-Content -LiteralPath $PD -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $m) } catch {} }
+try {
+  P "==================== DEEP PRINT DIAG  (pid $PID  session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)  user $env:USERNAME) ===================="
+  # who is logged on right now (fast-user-switching => a cross-session bridge fighting over the USB)
+  try { Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '(?i)^(explorer|kioskbar|kioskshell|otzar|HttpToUsbBridge|msedge)$' } | Sort-Object ProcessName,SessionId | Select-Object ProcessName,Id,SessionId -Unique | ForEach-Object { P "session-proc: $($_.ProcessName) pid=$($_.Id) session=$($_.SessionId)" } } catch { P "session dump err: $($_.Exception.Message)" }
+  # print / spooler / per-user print services + state IN THIS SESSION
+  try { Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)print|spool|workflow|deviceconfig|deviceassoc|fax|usbmon' } | ForEach-Object { P "svc $($_.Name) = $($_.Status) [$($_.StartType)]" } } catch { P "svc dump err: $($_.Exception.Message)" }
+  # every HttpToUsbBridge instance + its session (is the bridge serving OUR session or another?)
+  try { $anyB=$false; Get-Process HttpToUsbBridge -ErrorAction SilentlyContinue | ForEach-Object { $anyB=$true; P "bridge pid=$($_.Id) session=$($_.SessionId) start=$(try{$_.StartTime.ToString('HH:mm:ss')}catch{'?'})" }; if (-not $anyB) { P "bridge: NONE running" } } catch { P "bridge dump err: $($_.Exception.Message)" }
+  # who owns the IPP-over-USB port 50000
+  try { $anyP=$false; Get-NetTCPConnection -LocalPort 50000 -ErrorAction SilentlyContinue | ForEach-Object { $anyP=$true; $op=$_.OwningProcess; $pr=Get-Process -Id $op -ErrorAction SilentlyContinue; P "port50000 $($_.State) remote=$($_.RemoteAddress):$($_.RemotePort) pid=$op name=$($pr.ProcessName) session=$($pr.SessionId)" }; if (-not $anyP) { P "port50000: nobody listening/connected" } } catch { P "port50000 err: $($_.Exception.Message)" }
+  # Brother registry config (attributes, port, devmode presence)
+  try { $bk='HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\Brother MFC-J4355DW'; if (Test-Path -LiteralPath $bk) { (Get-ItemProperty -LiteralPath $bk).PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notmatch '^PS' } | ForEach-Object { $v=$_.Value; if ($v -is [byte[]]) { $v = "<$($v.Length) bytes>" }; P "reg[$($_.Name)] = $v" } } else { P "reg: Brother printer key not found" } } catch { P "reg dump err: $($_.Exception.Message)" }
+  # CAPABILITY TIMING BREAKDOWN - the key measurement: which call eats the ~90s
+  Add-Type -AssemblyName System.Drawing
+  foreach ($pn in @('Brother MFC-J4355DW','Microsoft Print to PDF')) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    P "cap '$pn': START"
+    try {
+      $ps = New-Object System.Drawing.Printing.PrinterSettings; $ps.PrinterName = $pn
+      P "cap '$pn': settings @ $($sw.ElapsedMilliseconds)ms"
+      $iv = $ps.IsValid; P "cap '$pn': IsValid=$iv @ $($sw.ElapsedMilliseconds)ms"
+      $pc = 'ERR'; try { $pc = $ps.PaperSizes.Count } catch { $pc = "EXC:$($_.Exception.Message)" }; P "cap '$pn': PaperSizes=$pc @ $($sw.ElapsedMilliseconds)ms  <-- slow one if this jumps"
+      $rc = 'ERR'; try { $rc = $ps.PrinterResolutions.Count } catch { $rc = "EXC:$($_.Exception.Message)" }; P "cap '$pn': Resolutions=$rc @ $($sw.ElapsedMilliseconds)ms"
+      $sc = 'ERR'; try { $sc = $ps.PaperSources.Count } catch { $sc = "EXC:$($_.Exception.Message)" }; P "cap '$pn': PaperSources=$sc @ $($sw.ElapsedMilliseconds)ms  (TOTAL)"
+    } catch { P "cap '$pn': OUTER EXC $($_.Exception.Message) @ $($sw.ElapsedMilliseconds)ms" }
+  }
+  P "==================== END DEEP PRINT DIAG ===================="
+  Log "DEEP PRINT DIAG written to printdiag.log"
+} catch { P "DEEP DIAG fatal: $($_.Exception.Message)"; Log "deep print diag fatal: $($_.Exception.Message)" }
 # --- start printer-vendor support processes (normally started by explorer via the Run keys). ---
 # The kiosk shell REPLACES explorer, so Run-key programs never start in this session. Brother's
 # HttpToUsbBridge.exe carries IPP-over-USB between Windows and a USB Brother - without it the
