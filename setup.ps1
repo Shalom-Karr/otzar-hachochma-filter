@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.26'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.27'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -533,19 +533,43 @@ if (-not $Undo) {
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
 Slog "Editing the kiosk user hive: policies + launcher shell + writing launcher scripts..." "Cyan"
-$line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
-if ($line -and ($line -match '\s(\d+)\s+(Active|Disc)')) {
-    Write-Host "Signing out Otzar session $($matches[1]) ..." -ForegroundColor Cyan
-    logoff $matches[1] 2>$null
+# Find the Otzar session so we can sign it out (its hive can't load while the profile is in use).
+# quser.exe is missing on some Windows 11 Home installs, so fall back to matching the user's own
+# interactive process (explorer/kioskbar/otzar) to its session id.
+$otzarSession = $null
+try {
+    if (Get-Command quser -ErrorAction SilentlyContinue) {
+        $line = quser 2>$null | Where-Object { $_ -match [regex]::Escape($OtzarUser) }
+        if ($line -and ($line -match '\s(\d+)\s+(Active|Disc)')) { $otzarSession = $matches[1] }
+    }
+    if (-not $otzarSession) {
+        $short = $OtzarUser.Split('\')[-1]
+        $op = Get-CimInstance Win32_Process -Filter "Name='explorer.exe' OR Name='kioskbar.exe' OR Name='otzar.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { try { ($_ | Invoke-CimMethod -MethodName GetOwner -ErrorAction SilentlyContinue).User -eq $short } catch { $false } } |
+              Select-Object -First 1
+        if ($op) { $otzarSession = [string]$op.SessionId }
+    }
+} catch {}
+if ($otzarSession) {
+    Write-Host "Signing out Otzar session $otzarSession ..." -ForegroundColor Cyan
+    $logoffExe = Get-Command logoff -ErrorAction SilentlyContinue
+    if ($logoffExe) { logoff $otzarSession 2>$null } elseif (Test-Path "$env:windir\System32\logoff.exe") { & "$env:windir\System32\logoff.exe" $otzarSession 2>$null }
     Start-Sleep 3
 }
 
 $dat = Join-Path $OtzarProfile "NTUSER.DAT"
-reg load "HKU\LockAll" $dat | Out-Null
-if ($LASTEXITCODE -ne 0) {
+# Retry the load: after sign-out the profile takes a moment to unload; GC releases any handle we hold.
+$hiveLoaded = $false
+for ($ltry = 1; $ltry -le 5; $ltry++) {
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    reg load "HKU\LockAll" $dat 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $hiveLoaded = $true; break }
+    Start-Sleep 3
+}
+if (-not $hiveLoaded) {
     Write-Host "Could not load the Otzar hive - policies + shell SKIPPED." -ForegroundColor Red
-    Write-Host "  If the account is NEW: log into '$OtzarUser' once (creates the profile), sign out, then run setup.ps1 again." -ForegroundColor Yellow
-    Write-Host "  If already set up: make sure '$OtzarUser' is SIGNED OUT, then re-run." -ForegroundColor Yellow
+    Write-Host "  The profile is in use (NTUSER.DAT locked). REBOOT so '$OtzarUser' is not logged in, then re-run setup.ps1 (do not sign into Otzar first)." -ForegroundColor Yellow
+    Write-Host "  If the account is NEW: log into '$OtzarUser' once to create the profile, sign out, then run setup.ps1." -ForegroundColor Yellow
 } else {
     $sys   = "HKU\LockAll\Software\Microsoft\Windows\CurrentVersion\Policies\System"
     $exp   = "HKU\LockAll\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"

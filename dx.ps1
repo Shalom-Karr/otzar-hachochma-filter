@@ -49,20 +49,17 @@ try {
     if (Test-Path $pm) { Start-Process $pm -ArgumentList "/AcceptEula /Quiet /Minimized /BackingFile `"$pml`"" -WindowStyle Hidden; Start-Sleep 4; $pmOn = $true; Say "Process Monitor capturing." }
 } catch { Say "ProcMon unavailable ($($_.Exception.Message)); continuing with network/thread sampling only." }
 
-# ---- launch the probe as Otzar ----
-$tn = 'DxProbe'; $restorePw = $false; $otzarPid = $null
+# ---- launch the probe AS Otzar: set a temp password, runas (interactive desktop), restore after ----
+$restorePw = $false; $otzarPid = $null
 try {
-    $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -out "{1}" -pidfile "{2}"' -f $probeFile,$plog,$pidf)
-    if (@(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -gt 0) {
-        Say "Otzar is logged on -> running in its live session (interactive token)."
-        $principal = New-ScheduledTaskPrincipal -UserId $OtzarUser -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $tn -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
-    } else {
-        Say "Otzar not logged on -> temp password (restored after). NOTE: batch session may hang; best run while the kiosk is showing Otzar."
-        $tmpPw = 'Dx!' + (Get-Random -Maximum 999999); cmd /c "net user `"$OtzarUser`" `"$tmpPw`"" | Out-Null; $restorePw = $true
-        Register-ScheduledTask -TaskName $tn -Action $action -User $OtzarUser -Password $tmpPw -RunLevel Limited -Force -ErrorAction Stop | Out-Null
-    }
-    Start-ScheduledTask -TaskName $tn
+    $tmpPw = 'Dx!' + (Get-Random -Maximum 999999)
+    cmd /c "net user `"$OtzarUser`" `"$tmpPw`"" | Out-Null
+    $restorePw = $true
+    $sec  = ConvertTo-SecureString $tmpPw -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential(".\$OtzarUser", $sec)
+    $pargs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -out "{1}" -pidfile "{2}"' -f $probeFile,$plog,$pidf
+    Say "launching the probe AS '$OtzarUser' (temp password, interactive desktop, restored after)..."
+    Start-Process -FilePath $exe -ArgumentList $pargs -Credential $cred -ErrorAction Stop
 
     # ---- sample what the probe waits on, while it runs ----
     $d0 = (Get-Date)
@@ -81,8 +78,7 @@ try {
     } else { Say "never got the probe PID (probe may not have started - is Otzar's kiosk exe present, and is Otzar logged on?)." }
 } catch { Say "probe launch err: $($_.Exception.Message)" }
 finally {
-    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
-    if ($restorePw) { cmd /c "net user `"$OtzarUser`" `"`"" | Out-Null; Say "restored '$OtzarUser' blank password." }
+    if ($restorePw) { cmd /c "net user `"$OtzarUser`" `"`"" | Out-Null; Say "restored '$OtzarUser' blank password (auto-login intact)." }
 }
 
 # ---- stop + parse ProcMon ----
@@ -92,7 +88,17 @@ if ($pmOn) {
         Start-Process $pm -ArgumentList "/OpenLog `"$pml`" /SaveAs `"$pmCsv`"" -WindowStyle Hidden -Wait; Start-Sleep 2
         if (Test-Path $pmCsv) {
             $rows = Import-Csv $pmCsv -ErrorAction SilentlyContinue
-            $mine = $rows | Where-Object { $_.PID -eq $otzarPid -or $_.'Process Name' -match '(?i)kioskbar|powershell' }
+            $mine = @($rows | Where-Object { $_.PID -eq $otzarPid })
+            if (-not $mine.Count) { $mine = @($rows | Where-Object { $_.'Process Name' -match '(?i)kioskbar|powershell' }) }
+            Say "`n--- STALL POINTS: gaps > 2s between the probe's consecutive ops (the op listed is what stalled) ---"
+            $prev = $null
+            foreach ($row in $mine) {
+                if ($prev) {
+                    try { $g = ([datetime]::Parse($row.'Time of Day') - [datetime]::Parse($prev.'Time of Day')).TotalSeconds
+                        if ($g -gt 2) { Say ("  +{0:N1}s  after: {1} [{2}] {3}  {4}" -f $g, $prev.Operation, $prev.Result, $prev.Path, $prev.Detail) } } catch {}
+                }
+                $prev = $row
+            }
             Say "`n--- ProcMon: NON-SUCCESS results for the probe process ---"
             $mine | Where-Object { $_.Result -and $_.Result -ne 'SUCCESS' } | Group-Object Result | Sort-Object Count -Descending | ForEach-Object { Say ("  {0} x {1}" -f $_.Count, $_.Name) }
             Say "`n--- sample denied / not-found / network (top 30) ---"
