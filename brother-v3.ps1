@@ -16,8 +16,32 @@ $exe = "$dir\brother-driver.exe"
 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 
 Write-Host "Downloading Brother printer driver (~50 MB)..." -ForegroundColor Cyan
-try { Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 600 -Headers @{ 'User-Agent'='Mozilla/5.0' } }
-catch { Write-Host "Download failed: $($_.Exception.Message)" -ForegroundColor Red; return }
+# how big should it be? (integrity check so we never extract a truncated file)
+$expected = 0; try { $expected = [long]((Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30 -Headers @{ 'User-Agent'='Mozilla/5.0' }).Headers.'Content-Length') } catch {}
+function Good { param($f,$exp) (Test-Path $f) -and ((Get-Item $f).Length -ge ($(if($exp -gt 0){$exp*0.98}else{40MB}))) }
+
+$ok = Good $exe $expected
+if ($ok) { Write-Host "  already downloaded." -ForegroundColor Green }
+for ($try = 1; $try -le 5 -and -not $ok; $try++) {
+    Write-Host "  attempt $try ..." -ForegroundColor DarkGray
+    try {
+        # BITS: resumes across the filter dropping the connection; best for flaky networks
+        Import-Module BitsTransfer -ErrorAction SilentlyContinue
+        Start-BitsTransfer -Source $url -Destination $exe -ErrorAction Stop -RetryInterval 60 -RetryTimeout 600
+    } catch {
+        Write-Host "    BITS failed ($($_.Exception.Message)); trying a direct download..." -ForegroundColor DarkGray
+        try { Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 900 -Headers @{ 'User-Agent'='Mozilla/5.0' } } catch { Write-Host "    direct download failed ($($_.Exception.Message))" -ForegroundColor DarkGray }
+    }
+    $ok = Good $exe $expected
+    if (-not $ok) { Remove-Item $exe -Force -ErrorAction SilentlyContinue; Start-Sleep 4 }
+}
+if (-not $ok) {
+    Write-Host "Download failed after retries - the content filter is likely blocking download.brother.com." -ForegroundColor Red
+    Write-Host "Workaround: download this file on any other computer/phone:" -ForegroundColor Yellow
+    Write-Host "  $url" -ForegroundColor Yellow
+    Write-Host "then copy it to '$exe' and re-run this script (it will skip the download)." -ForegroundColor Yellow
+    return
+}
 Write-Host "  saved $exe ($([math]::Round((Get-Item $exe).Length/1MB,1)) MB)" -ForegroundColor Green
 
 Write-Host "Extracting the driver (a Brother window may briefly appear - that's fine)..." -ForegroundColor Cyan
