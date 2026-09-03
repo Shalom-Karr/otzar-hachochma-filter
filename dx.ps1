@@ -11,6 +11,8 @@ $OtzarUser = 'Otzar Hachochma'
 $pub  = 'C:\Users\Public\Documents\OtzarKiosk'
 $res  = "$env:USERPROFILE\Downloads\dx-result.txt"
 if (-not (Test-Path $pub)) { New-Item -ItemType Directory -Path $pub -Force | Out-Null }
+# the probe runs AS Otzar - make sure it can write its log/pid here (lockdown may deny it otherwise)
+try { icacls $pub /grant "${OtzarUser}:(OI)(CI)M" /grant "*S-1-5-32-545:(OI)(CI)M" /T /Q 2>$null | Out-Null } catch {}
 foreach ($f in "$pub\dx-probe.log","$pub\dx-probe.pid","$res") { Remove-Item $f -ErrorAction SilentlyContinue }
 function Say($m) { Write-Host $m; Add-Content -LiteralPath $res -Value $m }
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Run elevated (admin)." }
@@ -49,17 +51,22 @@ try {
     if (Test-Path $pm) { Start-Process $pm -ArgumentList "/AcceptEula /Quiet /Minimized /BackingFile `"$pml`"" -WindowStyle Hidden; Start-Sleep 4; $pmOn = $true; Say "Process Monitor capturing." }
 } catch { Say "ProcMon unavailable ($($_.Exception.Message)); continuing with network/thread sampling only." }
 
-# ---- launch the probe AS Otzar: set a temp password, runas (interactive desktop), restore after ----
-$restorePw = $false; $otzarPid = $null
+# ---- run the probe in Otzar's REAL kiosk session (the SLOW one) via its interactive token ----
+# runas lands in admin's session (fast, useless). The interactive-token scheduled task runs in the
+# logged-on Otzar session = the slow session we need ProcMon to capture. Otzar must be logged in
+# (it is, via kiosk auto-login).
+$tn = 'DxProbe'; $restorePw = $false; $otzarPid = $null
 try {
-    $tmpPw = 'Dx!' + (Get-Random -Maximum 999999)
-    cmd /c "net user `"$OtzarUser`" `"$tmpPw`"" | Out-Null
-    $restorePw = $true
-    $sec  = ConvertTo-SecureString $tmpPw -AsPlainText -Force
-    $cred = New-Object System.Management.Automation.PSCredential(".\$OtzarUser", $sec)
-    $pargs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -out "{1}" -pidfile "{2}"' -f $probeFile,$plog,$pidf
-    Say "launching the probe AS '$OtzarUser' (temp password, interactive desktop, restored after)..."
-    Start-Process -FilePath $exe -ArgumentList $pargs -Credential $cred -ErrorAction Stop
+    if (@(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -eq 0) {
+        Say "STOP: Otzar is not logged on - reboot (it auto-logs into Otzar), switch to admin, then re-run dx."
+        if ($pmOn) { try { Start-Process $pm -ArgumentList "/Terminate" -WindowStyle Hidden -Wait } catch {} }
+        return
+    }
+    $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -out "{1}" -pidfile "{2}"' -f $probeFile,$plog,$pidf)
+    $principal = New-ScheduledTaskPrincipal -UserId $OtzarUser -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $tn -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+    Say "running the probe in Otzar's live kiosk session (the slow one) - this takes ~2 min..."
+    Start-ScheduledTask -TaskName $tn
 
     # ---- sample what the probe waits on, while it runs ----
     $d0 = (Get-Date)
@@ -78,6 +85,7 @@ try {
     } else { Say "never got the probe PID (probe may not have started - is Otzar's kiosk exe present, and is Otzar logged on?)." }
 } catch { Say "probe launch err: $($_.Exception.Message)" }
 finally {
+    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
     if ($restorePw) { cmd /c "net user `"$OtzarUser`" `"`"" | Out-Null; Say "restored '$OtzarUser' blank password (auto-login intact)." }
 }
 
