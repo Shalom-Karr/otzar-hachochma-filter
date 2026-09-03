@@ -48,24 +48,40 @@ Set-Content -LiteralPath $probeFile -Value $probe -Encoding UTF8
 Write-Host "1/2  Running the probe as ADMIN ($env:USERNAME)..." -ForegroundColor Cyan
 & $probeFile -tag 'ADMIN' -out $out
 
-Write-Host "2/2  Running the probe as '$OtzarUser' in its live session (this can take ~2 min if the Brother query is slow there)..." -ForegroundColor Cyan
+Write-Host "2/2  Running the probe as '$OtzarUser' (this can take ~2 min if the Brother query is slow there)..." -ForegroundColor Cyan
 $exe = @('D:\Kiosk\kioskbar.exe','C:\Kiosk\kioskbar.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $exe) { $exe = "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe" }   # fallback (only works if not denied)
 $tn = 'OtzarPrintProbe'
+$restorePw = $false
 try {
-    $loggedOn = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | ForEach-Object { ($_ | Invoke-CimMethod -MethodName GetOwner).User }) -contains ($OtzarUser.Split(' ')[0]) -or `
-                (@(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -gt 0)
-    if (-not $loggedOn) { Write-Host "  NOTE: '$OtzarUser' may not be logged on; the interactive run needs it signed in (it's the kiosk auto-login)." -ForegroundColor Yellow }
-    $action    = New-ScheduledTaskAction -Execute $exe -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -tag OTZAR -out "{1}"' -f $probeFile, $out)
-    $principal = New-ScheduledTaskPrincipal -UserId $OtzarUser -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $tn -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+    $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -tag OTZAR -out "{1}"' -f $probeFile, $out)
+    # Is Otzar already logged on? kioskbar.exe only runs in the Otzar session -> a reliable signal.
+    $otzarLoggedOn = @(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -gt 0
+    if ($otzarLoggedOn) {
+        # BEST: run in Otzar's LIVE session via its interactive token (no password, faithful - real bridge + per-user services)
+        Write-Host "  '$OtzarUser' is logged on -> running in its live session (interactive token)." -ForegroundColor DarkGray
+        $principal = New-ScheduledTaskPrincipal -UserId $OtzarUser -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $tn -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+    } else {
+        # AUTO: Otzar is not logged in. Blank passwords are blocked for batch logon, so set a
+        # TEMP password, run the probe as Otzar (batch logon - no manual sign-in), then restore
+        # the blank password so kiosk auto-login keeps working. (Non-interactive: the USB bridge
+        # may not be up, so a slow/failed Brother query here still points at the driver path.)
+        Write-Host "  '$OtzarUser' is not logged on -> auto-running it via a temporary password (restored afterward)." -ForegroundColor DarkGray
+        $tmpPw = 'OtzarProbe!' + (Get-Random -Maximum 999999)
+        cmd /c "net user `"$OtzarUser`" `"$tmpPw`"" | Out-Null
+        $restorePw = $true
+        Register-ScheduledTask -TaskName $tn -Action $action -User $OtzarUser -Password $tmpPw -RunLevel Limited -Force -ErrorAction Stop | Out-Null
+    }
     Start-ScheduledTask -TaskName $tn
     $deadline = (Get-Date).AddSeconds(160)
     do { Start-Sleep 3 } until (((Get-Content $out -ErrorAction SilentlyContinue | Select-String 'END OTZAR')) -or ((Get-Date) -gt $deadline))
+    if (-not (Get-Content $out -ErrorAction SilentlyContinue | Select-String 'END OTZAR')) { Add-Content -LiteralPath $out -Value "  [OTZAR]  (timed out after 160s - the Brother query never returned)" }
 } catch {
     Add-Content -LiteralPath $out -Value "  [OTZAR]  could not launch as $OtzarUser : $($_.Exception.Message)"
 } finally {
     Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
+    if ($restorePw) { cmd /c "net user `"$OtzarUser`" `"`"" | Out-Null; Write-Host "  restored '$OtzarUser' blank password (auto-login intact)." -ForegroundColor DarkGray }
 }
 
 Write-Host "`n=================== ADMIN vs OTZAR (also saved to $out) ===================" -ForegroundColor Green
