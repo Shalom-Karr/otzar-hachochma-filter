@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.0.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.0.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -835,6 +835,7 @@ public class WA {
   [DllImport("user32.dll")] public static extern bool LockWorkStation();
   [DllImport("user32.dll")] public static extern bool ExitWindowsEx(uint uFlags, uint dwReason);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -876,8 +877,12 @@ $script:HideExplorerWindows = {
     $cb = [WA+EnumProc]{ param($h, $l)
       try { $sb = New-Object System.Text.StringBuilder 64; [WA]::GetClassName($h, $sb, 64) | Out-Null
         $c = $sb.ToString()
-        # hide any explorer folder window AND, as insurance, any taskbar/Start a stray shell could make
-        if ($c -eq 'CabinetWClass' -or $c -eq 'ExploreWClass' -or $c -eq 'Shell_TrayWnd' -or $c -eq 'Shell_SecondaryTrayWnd') { [WA]::ShowWindow($h, 0) | Out-Null } } catch {}   # SW_HIDE = 0
+        # the explorer we run for the print broker also spawns the Windows taskbar + desktop; keep them
+        # invisible: hide AND shove off-screen (survives explorer re-showing them between ticks).
+        if ($c -eq 'Shell_TrayWnd' -or $c -eq 'Shell_SecondaryTrayWnd' -or $c -eq 'CabinetWClass' -or $c -eq 'ExploreWClass' -or $c -eq 'Progman' -or $c -eq 'WorkerW') {
+          [WA]::ShowWindow($h, 0) | Out-Null                                                        # SW_HIDE
+          [WA]::SetWindowPos($h, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0090) | Out-Null           # SWP_NOZORDER|SWP_NOACTIVATE, parked off-screen
+        } } catch {}
       return $true }
     [WA]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
   } catch {}
@@ -893,7 +898,7 @@ $script:StartBrokerExplorer = {
     # user could try to open a file window - this hides any explorer folder window / stray taskbar the
     # instant it appears, for the life of the session.
     $explTmr = New-Object System.Windows.Forms.Timer
-    $explTmr.Interval = 400
+    $explTmr.Interval = 250
     $explTmr.Add_Tick({ & $script:HideExplorerWindows }.GetNewClosure())
     $explTmr.Start()
   } catch { Log "start-broker-explorer err: $($_.Exception.Message)" }
