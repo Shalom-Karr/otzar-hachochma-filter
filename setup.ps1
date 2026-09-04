@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.31'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.0.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -648,6 +648,14 @@ if (-not $hiveLoaded) {
         # remove the custom .pdf handler (OtzarPDF ProgId + the .pdf Classes default)
         reg delete "HKU\LockAll\Software\Classes\OtzarPDF" /f 2>$null | Out-Null
         reg delete "HKU\LockAll\Software\Classes\.pdf" /f 2>$null | Out-Null
+        # restore accessibility hotkeys to their Windows defaults
+        reg add "HKU\LockAll\Control Panel\Accessibility\StickyKeys"        /v Flags /t REG_SZ /d 510 /f 2>$null | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\Keyboard Response" /v Flags /t REG_SZ /d 126 /f 2>$null | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\ToggleKeys"        /v Flags /t REG_SZ /d 62  /f 2>$null | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\HighContrast"      /v Flags /t REG_SZ /d 4094 /f 2>$null | Out-Null
+        reg delete $exp /v NoSetTaskbar /f 2>$null | Out-Null
+        reg delete $exp /v NoThemesTab /f 2>$null | Out-Null
+        reg delete $exp /v NoWindowsUpdate /f 2>$null | Out-Null
         reg add    $wl    /v Shell /t REG_SZ /d "explorer.exe" /f | Out-Null
         Write-Host "Policies removed, shell restored to explorer.exe." -ForegroundColor Green
     } else {
@@ -659,6 +667,16 @@ if (-not $hiveLoaded) {
         reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v HideFastUserSwitching /f 2>$null | Out-Null   # NEVER hide fast-user-switching - it also hides the Otzar account at the login screen; clean up any prior value
         reg add $exp   /v NoRun                      /t REG_DWORD /d 1 /f | Out-Null
         reg add $exp   /v NoControlPanel             /t REG_DWORD /d 1 /f | Out-Null
+        reg add $exp   /v NoSetTaskbar               /t REG_DWORD /d 1 /f | Out-Null   # no taskbar props
+        reg add $exp   /v NoThemesTab                /t REG_DWORD /d 1 /f | Out-Null
+        reg add $exp   /v NoWindowsUpdate            /t REG_DWORD /d 1 /f | Out-Null
+        # Disable the accessibility HOTKEYS (Shift x5 StickyKeys, hold-Shift FilterKeys, NumLock ToggleKeys,
+        # LAlt+LShift+PrtScn HighContrast) - their pop-ups link to the Ease of Access SETTINGS page, a classic
+        # kiosk escape. Clearing bit 0x4 (HOTKEYACTIVE) kills the shortcut without touching anything else.
+        reg add "HKU\LockAll\Control Panel\Accessibility\StickyKeys"      /v Flags /t REG_SZ /d 506 /f | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\Keyboard Response" /v Flags /t REG_SZ /d 122 /f | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\ToggleKeys"      /v Flags /t REG_SZ /d 58  /f | Out-Null
+        reg add "HKU\LockAll\Control Panel\Accessibility\HighContrast"    /v Flags /t REG_SZ /d 4090 /f | Out-Null
         reg add $exp   /v NoWinKeys                  /t REG_DWORD /d 1 /f | Out-Null   # disable Win+key shortcuts (Win+I/Win+E...)
         reg add $exp   /v NoLogoff                   /t REG_DWORD /d 1 /f | Out-Null   # remove "Sign out" from Ctrl+Alt+Del + Start
         reg add $exp   /v NoClose                    /t REG_DWORD /d 1 /f | Out-Null   # remove Shut Down/Restart/Sleep from Ctrl+Alt+Del + Start (UI only; API still works)
@@ -858,7 +876,8 @@ $script:HideExplorerWindows = {
     $cb = [WA+EnumProc]{ param($h, $l)
       try { $sb = New-Object System.Text.StringBuilder 64; [WA]::GetClassName($h, $sb, 64) | Out-Null
         $c = $sb.ToString()
-        if ($c -eq 'CabinetWClass' -or $c -eq 'ExploreWClass') { [WA]::ShowWindow($h, 0) | Out-Null } } catch {}   # SW_HIDE = 0
+        # hide any explorer folder window AND, as insurance, any taskbar/Start a stray shell could make
+        if ($c -eq 'CabinetWClass' -or $c -eq 'ExploreWClass' -or $c -eq 'Shell_TrayWnd' -or $c -eq 'Shell_SecondaryTrayWnd') { [WA]::ShowWindow($h, 0) | Out-Null } } catch {}   # SW_HIDE = 0
       return $true }
     [WA]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
   } catch {}
@@ -870,10 +889,12 @@ $script:StartBrokerExplorer = {
       Log "started explorer.exe (broker helper for the print stack)"
     }
     & $script:HideExplorerWindows
-    $script:explTicks = 0
+    # keep hiding FOREVER (every 400ms): explorer.exe is runnable (needed for the broker), so a smart
+    # user could try to open a file window - this hides any explorer folder window / stray taskbar the
+    # instant it appears, for the life of the session.
     $explTmr = New-Object System.Windows.Forms.Timer
-    $explTmr.Interval = 600
-    $explTmr.Add_Tick({ $script:explTicks++; & $script:HideExplorerWindows; if ($script:explTicks -ge 50) { $explTmr.Stop() } }.GetNewClosure())
+    $explTmr.Interval = 400
+    $explTmr.Add_Tick({ & $script:HideExplorerWindows }.GetNewClosure())
     $explTmr.Start()
   } catch { Log "start-broker-explorer err: $($_.Exception.Message)" }
 }
@@ -1097,6 +1118,7 @@ public class KHook {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
   [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 }
 "@
   # thread-safe input-event buffer; hooks only enqueue (fast), a timer resolves+writes debugger.log.
@@ -1112,9 +1134,13 @@ public class KHook {
         $w = $wParam.ToInt32()
         if ($w -eq 0x100 -or $w -eq 0x104) { [void]$script:evtBuf.Add(@{ k='KEY'; vk=$vk; time=(Get-Date) }) }   # WM_KEYDOWN / WM_SYSKEYDOWN
         if ($vk -eq 0x5B -or $vk -eq 0x5C) { return [IntPtr]1 }              # swallow Left/Right Windows key
-        # swallow Alt+Tab and Alt+Esc so a patron can't reach the hidden explorer window (broker helper)
+        # swallow escape combos so a smart user can't switch away / reach the hidden explorer window or a shell.
         $kflags = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam, 8)   # KBDLLHOOKSTRUCT.flags
-        if (($kflags -band 0x20) -and ($vk -eq 0x09 -or $vk -eq 0x1B)) { return [IntPtr]1 }   # LLKHF_ALTDOWN + Tab/Esc
+        $altDn  = ($kflags -band 0x20) -ne 0                                          # LLKHF_ALTDOWN
+        $ctrlDn = ([KHook]::GetAsyncKeyState(0x11) -band 0x8000) -ne 0                # Ctrl held
+        if ($altDn  -and ($vk -eq 0x09 -or $vk -eq 0x1B -or $vk -eq 0x73)) { return [IntPtr]1 }   # Alt+Tab / Alt+Esc / Alt+F4
+        if ($ctrlDn -and ($vk -eq 0x1B)) { return [IntPtr]1 }                                     # Ctrl+Esc (Start)
+        if ($vk -eq 0x5D) { return [IntPtr]1 }                                                    # Apps/Menu (context) key
       }
     } catch {}
     return [KHook]::CallNextHookEx([IntPtr]::Zero, $nCode, $wParam, $lParam)
