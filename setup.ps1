@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '2.0.30'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '2.0.31'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -822,6 +822,7 @@ public class WA {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint tid);
   [DllImport("user32.dll")] public static extern IntPtr LoadKeyboardLayout(string id, uint flags);
@@ -847,6 +848,35 @@ function Dbg($m) {
 }
 Log "launcher started"
 Dbg "===== debugger started (pid $PID) ====="
+# --- start explorer.exe (kept HIDDEN) to give this session the shell/COM broker the modern print
+# stack needs. PROVEN: printer capability queries take ~2s with explorer running vs ~60s without
+# (which made Edge preview "0 pages"). The kiosk shell stays kioskbar (Winlogon Shell value);
+# explorer only runs to provide broker services. Any folder window it opens is hidden immediately,
+# and Alt+Tab/Alt+Esc are swallowed by the keyboard hook so a patron cannot reach it.
+$script:HideExplorerWindows = {
+  try {
+    $cb = [WA+EnumProc]{ param($h, $l)
+      try { $sb = New-Object System.Text.StringBuilder 64; [WA]::GetClassName($h, $sb, 64) | Out-Null
+        $c = $sb.ToString()
+        if ($c -eq 'CabinetWClass' -or $c -eq 'ExploreWClass') { [WA]::ShowWindow($h, 0) | Out-Null } } catch {}   # SW_HIDE = 0
+      return $true }
+    [WA]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+  } catch {}
+}
+$script:StartBrokerExplorer = {
+  try {
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId })) {
+      Start-Process explorer.exe -ErrorAction SilentlyContinue
+      Log "started explorer.exe (broker helper for the print stack)"
+    }
+    & $script:HideExplorerWindows
+    $script:explTicks = 0
+    $explTmr = New-Object System.Windows.Forms.Timer
+    $explTmr.Interval = 600
+    $explTmr.Add_Tick({ $script:explTicks++; & $script:HideExplorerWindows; if ($script:explTicks -ge 50) { $explTmr.Stop() } }.GetNewClosure())
+    $explTmr.Start()
+  } catch { Log "start-broker-explorer err: $($_.Exception.Message)" }
+}
 # --- audit: log what explorer WOULD have run at logon (we replaced it, so these do NOT auto-run) ---
 # Read-only inventory so we can see if anything besides the printer bridge is needed. Nothing here
 # is auto-executed (RunOnce/Startup can carry destructive or unwanted leftovers) - it is logged for review.
@@ -1082,6 +1112,9 @@ public class KHook {
         $w = $wParam.ToInt32()
         if ($w -eq 0x100 -or $w -eq 0x104) { [void]$script:evtBuf.Add(@{ k='KEY'; vk=$vk; time=(Get-Date) }) }   # WM_KEYDOWN / WM_SYSKEYDOWN
         if ($vk -eq 0x5B -or $vk -eq 0x5C) { return [IntPtr]1 }              # swallow Left/Right Windows key
+        # swallow Alt+Tab and Alt+Esc so a patron can't reach the hidden explorer window (broker helper)
+        $kflags = [System.Runtime.InteropServices.Marshal]::ReadInt32($lParam, 8)   # KBDLLHOOKSTRUCT.flags
+        if (($kflags -band 0x20) -and ($vk -eq 0x09 -or $vk -eq 0x1B)) { return [IntPtr]1 }   # LLKHF_ALTDOWN + Tab/Esc
       }
     } catch {}
     return [KHook]::CallNextHookEx([IntPtr]::Zero, $nCode, $wParam, $lParam)
@@ -1944,6 +1977,8 @@ if ($script:pgOn) {
   Log ("print gate ON (rate " + $script:pgCur + ('{0:N2}' -f $script:pgRate) + "/page)")
 }
 $bar.Show()
+# start the hidden broker explorer once the full-screen desktop is up (its window opens behind $bg)
+$bg.Add_Shown({ & $script:StartBrokerExplorer })
 [System.Windows.Forms.Application]::Run($bg)
 } catch { try { $_ | Out-File "C:\Users\Public\Documents\OtzarKiosk\kioskbar-error.log" -Force } catch {} }
 '@
