@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.1.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.1.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -571,6 +571,35 @@ if (-not $Undo) {
             }
         }
     } catch { Write-Host "  driver-switch err: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# ---------------- 3h. lock down LibreOffice macros (block the Basic-IDE Shell() break-out) ----------------
+# A determined user could open Tools > Macros > Edit Macros and run Shell("cmd") / Shell("explorer C:\")
+# to escape the kiosk. Deploy a FINALIZED (locked - the user cannot change it back) LibreOffice config
+# that disables macro execution AND the macro/Basic-IDE menu commands. Safe: the kiosk only views/prints
+# documents, which need no macros.
+if (-not $Undo) {
+    try {
+        $loUser = Join-Path $OtzarProfile 'AppData\Roaming\LibreOffice\4\user'
+        if (-not (Test-Path $loUser)) { New-Item -ItemType Directory -Path $loUser -Force | Out-Null }
+        $loXcu = @'
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse" oor:finalized="true"><value>3</value></prop></item>
+ <item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse" oor:finalized="true"><value>true</value></prop></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoBasicIDE" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:BasicIDEAppear</value></prop></node></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoMacroDlg" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:MacroDialog</value></prop></node></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoScriptOrg" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:ScriptOrganizer</value></prop></node></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoMacroRec" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:MacroRecorder</value></prop></node></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoRunMacro" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:RunMacro</value></prop></node></item>
+ <item oor:path="/org.openoffice.Office.Commands/Execute/Disabled"><node oor:name="KioskNoMacroOrg" oor:op="replace"><prop oor:name="Command" oor:op="fuse"><value>.uno:MacroOrganizer</value></prop></node></item>
+</oor:items>
+'@
+        Set-Content -LiteralPath (Join-Path $loUser 'registrymodifications.xcu') -Value $loXcu -Encoding ASCII
+        # keep it readable by the kiosk user but not writable (so it can't be tampered/deleted from a file dialog)
+        try { icacls (Join-Path $loUser 'registrymodifications.xcu') /inheritance:r /grant "*S-1-5-32-544:(F)" /grant "${OtzarUser}:(R)" 2>$null | Out-Null } catch {}
+        Slog "  LibreOffice macros DISABLED + Basic IDE/menu locked (blocks the Shell() break-out)" "Green"
+    } catch { Write-Host "  LibreOffice lockdown err: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
 # ---------------- 4. sign Otzar out, then edit its hive (policies + shell) ----------------
