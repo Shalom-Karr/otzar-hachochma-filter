@@ -54,7 +54,11 @@ $exe = @('D:\Kiosk\kioskbar.exe','C:\Kiosk\kioskbar.exe') | Where-Object { Test-
 if (-not $exe) { $exe = "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe" }
 $tn = 'FbProbe'
 try {
-    if (@(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -eq 0) { Say "STOP: Otzar not logged on - reboot to Otzar, switch to admin, re-run."; return }
+    # Is Otzar logged on? (kioskbar may have crashed, so also match ANY process owned by the Otzar user.)
+    $otzarUp = @(Get-Process kioskbar -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $otzarUp) { try { $otzarUp = @(Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -like "*Otzar*" }).Count -gt 0 } catch {} }
+    if (-not $otzarUp) { try { $otzarUp = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe' OR Name='sihost.exe'" -ErrorAction SilentlyContinue | Where-Object { try { ($_ | Invoke-CimMethod -MethodName GetOwner).User -eq 'Otzar Hachochma' } catch { $false } }).Count -gt 0 } catch {} }
+    if (-not $otzarUp) { Say "STOP: Otzar not logged on - reboot to Otzar, switch to admin, re-run."; return }
     $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -out "{1}"' -f $pf,$plog)
     $principal = New-ScheduledTaskPrincipal -UserId $OtzarUser -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $tn -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
