@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.0.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.1.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1947,6 +1947,10 @@ $script:pgCur  = '__PGCUR__'
 $script:pgOn   = __PGON__
 $script:pgSeen = @{}
 $script:pgDbg  = @{}
+# usernames of local administrators - their print jobs are maintenance (from the admin session) and
+# are NOT gated. Everything else (the patron, whatever owner name the Otzar/Edge print reports) IS.
+$script:pgAdmins = @()
+try { $script:pgAdmins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | ForEach-Object { ($_.Name -split '\\')[-1].ToLower() }) } catch {}
 $script:pgPrinters = @()
 $script:pgRefresh = 0
 $script:pgBusy = $false
@@ -1974,9 +1978,11 @@ if ($script:pgOn) {
           if ($script:pgDbg[$key] -ne $dbgSnap) { $script:pgDbg[$key] = $dbgSnap; Log "print job [$key] '$($j.DocumentName)' $dbgSnap" }
           if ($script:pgSeen.ContainsKey($key)) { continue }
           # The spooler is machine-wide: this watcher sees jobs from EVERY user/session (e.g. the
-          # admin account). Only gate THIS kiosk user's own jobs - never suspend another user's
-          # print job or the popup shows in the wrong session and the other user's print hangs.
-          if ($ju -ne '' -and ($ju -notmatch ('(^|\\)' + [regex]::Escape($env:USERNAME) + '$'))) { $script:pgSeen[$key] = $true; continue }
+          # admin account). Gate EVERY job except ones owned by a local admin (maintenance prints from
+          # the admin session) - so a patron's print is caught no matter what owner name the Otzar app
+          # or Edge stamps on it (the old exact-username match was skipping the Otzar app's own jobs).
+          $owner = ($ju -split '\\')[-1].ToLower()
+          if ($owner -and ($script:pgAdmins -contains $owner)) { $script:pgSeen[$key] = $true; Log "print gate: NOT gating admin job [$key] (owner=$ju)"; continue }
           # Hold a job the moment it is done spooling - not while JobStatus is empty (a brand-new
           # job the spooler has not stamped yet) or says Spooling. Suspending mid-spool freezes
           # the sending app ("Waiting for printer connection...") and reads a half-counted page
