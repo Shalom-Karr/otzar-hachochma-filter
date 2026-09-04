@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.1.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.1.2'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -923,12 +923,14 @@ $script:StartBrokerExplorer = {
       Log "started explorer.exe (broker helper for the print stack)"
     }
     & $script:HideExplorerWindows
-    # keep hiding FOREVER (every 400ms): explorer.exe is runnable (needed for the broker), so a smart
+    # keep hiding FOREVER (every 250ms): explorer.exe is runnable (needed for the broker), so a smart
     # user could try to open a file window - this hides any explorer folder window / stray taskbar the
-    # instant it appears, for the life of the session.
+    # instant it appears, for the life of the session. Capture the hide scriptblock in a LOCAL var: a
+    # GetNewClosure tick rebinds $script: to its own module (where it would be null -> "& null" crash).
+    $hideFn = $script:HideExplorerWindows
     $explTmr = New-Object System.Windows.Forms.Timer
     $explTmr.Interval = 250
-    $explTmr.Add_Tick({ & $script:HideExplorerWindows }.GetNewClosure())
+    $explTmr.Add_Tick({ & $hideFn }.GetNewClosure())
     $explTmr.Start()
   } catch { Log "start-broker-explorer err: $($_.Exception.Message)" }
 }
