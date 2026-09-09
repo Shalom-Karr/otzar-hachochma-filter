@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.1.3'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.2.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1913,16 +1913,16 @@ function Show-PrintDialog($doc, $pages, $rate, $cur) {
     $f.Controls.Add($ic)
 
     $t = New-Object System.Windows.Forms.Label
-    $t.Text = "Print this?"; $t.ForeColor = $cInk; $t.TextAlign = "MiddleCenter"
+    $t.Text = "Printing"; $t.ForeColor = $cInk; $t.TextAlign = "MiddleCenter"
     $t.Font = New-Object System.Drawing.Font("Segoe UI", 23, [System.Drawing.FontStyle]::Bold); $t.SetBounds(20, 92, 400, 42); $f.Controls.Add($t)
 
     $he = New-Object System.Windows.Forms.Label
-    $he.Text = (-join ([char]0x05DC,[char]0x05D4,[char]0x05D3,[char]0x05E4,[char]0x05D9,[char]0x05E1)) + "?"
+    $he.Text = (-join ([char]0x05DE,[char]0x05D3,[char]0x05E4,[char]0x05D9,[char]0x05E1))
     $he.ForeColor = $cMuted; $he.RightToLeft = "Yes"; $he.TextAlign = "MiddleCenter"
     $he.Font = New-Object System.Drawing.Font("Segoe UI", 13.5); $he.SetBounds(20, 136, 400, 24); $f.Controls.Add($he)
 
     $sub = New-Object System.Windows.Forms.Label
-    $sub.Text = "The job is waiting at the printer."; $sub.ForeColor = $cMuted; $sub.TextAlign = "MiddleCenter"
+    $sub.Text = "This print costs money - please pay at the desk."; $sub.ForeColor = $cMuted; $sub.TextAlign = "MiddleCenter"
     $sub.Font = New-Object System.Drawing.Font("Segoe UI", 10.5); $sub.SetBounds(20, 163, 400, 22); $f.Controls.Add($sub)
 
     $dl = New-Object System.Windows.Forms.Label
@@ -1944,21 +1944,19 @@ function Show-PrintDialog($doc, $pages, $rate, $cur) {
     $cc.Text = "$calcTxt"; $cc.ForeColor = $cFaint; $cc.TextAlign = "MiddleCenter"
     $cc.Font = New-Object System.Drawing.Font("Segoe UI", 9); $cc.SetBounds(20, 342, 400, 18); $f.Controls.Add($cc)
 
-    $no = New-Object System.Windows.Forms.Button
-    $no.Text = "No"; $no.SetBounds(40, 376, 150, 56); $no.FlatStyle = "Flat"; $no.FlatAppearance.BorderSize = 0
-    $no.BackColor = [System.Drawing.Color]::FromArgb(36,49,74); $no.ForeColor = $cInk; $no.Cursor = "Hand"
-    $no.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $no.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $f.Controls.Add($no)
-
-    $yes = New-Object System.Windows.Forms.Button
-    $yes.Text = "Yes, print"; $yes.SetBounds(200, 376, 200, 56); $yes.FlatStyle = "Flat"; $yes.FlatAppearance.BorderSize = 0
-    $yes.BackColor = [System.Drawing.Color]::FromArgb(34,197,94); $yes.ForeColor = [System.Drawing.Color]::FromArgb(4,36,15); $yes.Cursor = "Hand"
-    $yes.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $yes.DialogResult = [System.Windows.Forms.DialogResult]::OK; $f.Controls.Add($yes)
-
-    $f.AcceptButton = $yes; $f.CancelButton = $no
-    $dr = $f.ShowDialog(); $f.Dispose()
-    $ok = ($dr -eq [System.Windows.Forms.DialogResult]::OK)
-  } catch { Log "print dialog err: $($_.Exception.Message)"; $ok = $true }
-  return $ok
+    $gotit = New-Object System.Windows.Forms.Button
+    $gotit.Text = "Got it"; $gotit.SetBounds(120, 376, 200, 56); $gotit.FlatStyle = "Flat"; $gotit.FlatAppearance.BorderSize = 0
+    $gotit.BackColor = [System.Drawing.Color]::FromArgb(34,197,94); $gotit.ForeColor = [System.Drawing.Color]::FromArgb(4,36,15); $gotit.Cursor = "Hand"
+    $gotit.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15); $f.Controls.Add($gotit)
+    $gotit.Add_Click({ param($snd,$e); try { $snd.FindForm().Close() } catch {} })
+    $f.AcceptButton = $gotit
+    # NON-BLOCKING reminder: the job is NOT held - it prints regardless. Show it and auto-close after 12s.
+    $closeTmr = New-Object System.Windows.Forms.Timer; $closeTmr.Interval = 12000
+    $closeTmr.Add_Tick({ try { $closeTmr.Stop(); $f.Close() } catch {} }.GetNewClosure())
+    $f.Add_FormClosed({ try { $closeTmr.Dispose(); $f.Dispose() } catch {} }.GetNewClosure())
+    $closeTmr.Start()
+    $f.Show()
+  } catch { Log "print reminder err: $($_.Exception.Message)" }
 }
 
 # --- print gate: hold each spooled print job, confirm with the dialog, then release or delete ---
@@ -2003,28 +2001,19 @@ if ($script:pgOn) {
           # or Edge stamps on it (the old exact-username match was skipping the Otzar app's own jobs).
           $owner = ($ju -split '\\')[-1].ToLower()
           if ($owner -and ($script:pgAdmins -contains $owner)) { $script:pgSeen[$key] = $true; Log "print gate: NOT gating admin job [$key] (owner=$ju)"; continue }
-          # Hold a job the moment it is done spooling - not while JobStatus is empty (a brand-new
-          # job the spooler has not stamped yet) or says Spooling. Suspending mid-spool freezes
-          # the sending app ("Waiting for printer connection...") and reads a half-counted page
-          # number (TotalPages climbs 0,1,2,... while the job spools and is final at spool end).
-          # Do NOT wait longer than that: a fast printer can grab and finish the job in well
-          # under a second once spooling ends.
+          # DO NOT touch the spooler. Suspending a job mid-spool was what caused "Waiting for printer
+          # connection..." and broke printing (it worked before the gate held jobs). Just detect the job
+          # once it has finished spooling, read its page count, and show a NON-BLOCKING "costs $X"
+          # reminder. The job prints normally - this is an awareness popup, not a hold or a payment block.
           $jst = ''; try { $jst = [string]$j.JobStatus } catch {}
           if ($jst -eq '' -or $jst -match 'Spooling') { continue }
           $pages = 0; try { $pages = [int]$j.TotalPages } catch {}
           $script:pgSeen[$key] = $true
-          try { Suspend-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue } catch {}
-          # re-read now that the job is held - some drivers finish counting pages late
-          try { $j2 = Get-PrintJob -PrinterName $pn -ID $j.Id -ErrorAction SilentlyContinue; if ($j2 -and [int]$j2.TotalPages -gt $pages) { $pages = [int]$j2.TotalPages } } catch {}
-          Log "print job [$key] HELD for confirm (pages=$pages)"
-          [void]$new.Add(@{ Pn = $pn; Id = $j.Id; Doc = "$($j.DocumentName)"; Pages = $pages })
+          Log "print cost reminder: [$key] '$($j.DocumentName)' ($pages pg)"
+          [void]$new.Add(@{ Doc = "$($j.DocumentName)"; Pages = $pages })
         }
       }
-      foreach ($n in $new) {
-        $ans = Show-PrintDialog $n.Doc $n.Pages $script:pgRate $script:pgCur
-        if ($ans) { try { Resume-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print OK: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print resume err: $($_.Exception.Message)" } }
-        else { try { Remove-PrintJob -PrinterName $n.Pn -ID $n.Id -ErrorAction SilentlyContinue; Log "print CANCELLED: $($n.Doc) ($($n.Pages) pg)" } catch { Log "print remove err: $($_.Exception.Message)" } }
-      }
+      foreach ($n in $new) { try { Show-PrintDialog $n.Doc $n.Pages $script:pgRate $script:pgCur } catch { Log "reminder err: $($_.Exception.Message)" } }
       foreach ($k in @($script:pgSeen.Keys)) { if (-not $cur.ContainsKey($k)) { $script:pgSeen.Remove($k) } }
       foreach ($k in @($script:pgDbg.Keys))  { if (-not $cur.ContainsKey($k)) { $script:pgDbg.Remove($k); Log "print job [$k] left the queue" } }
     } catch { Log "print gate err: $($_.Exception.Message)" }
