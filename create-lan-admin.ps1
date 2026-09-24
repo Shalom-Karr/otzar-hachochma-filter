@@ -43,6 +43,10 @@ try {
     Write-Host "file-sharing + WMI firewall rules enabled." -ForegroundColor Green
 } catch {}
 
+# --- hide the account from the sign-in / Welcome screen (still works for network login + runas) ---
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v $User /t REG_DWORD /d 0 /f | Out-Null
+Write-Host "hidden '$User' from the login screen." -ForegroundColor Green
+
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like '192.168.*' } | Select-Object -First 1).IPAddress
 Write-Host "`n================ DONE ================" -ForegroundColor Cyan
 Write-Host " From the OTHER PC, connect as:" -ForegroundColor Cyan
