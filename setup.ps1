@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.3.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.3.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -2543,11 +2543,14 @@ try {
             $pdfOpenPs1 = Join-Path $kiosk "pdfopen.ps1"
             Set-Content -Path $pdfOpenPs1 -Value $pdfOpenBody -Encoding ASCII
 
-            # Register pdfopen.ps1 as the kiosk user's .pdf handler so Otzar's own PDF opens route through it
-            # (and thus open in a no-navigation Edge app window). $kioskExe is the copied powershell.exe.
-            # Best-effort: if Windows later regenerates a UserChoice for .pdf, the association can revert to
-            # Edge-normal, but the custom PDF browser always opens PDFs via the app-mode path regardless.
-            $pdfCmd = '"' + $kioskExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $pdfOpenPs1 + '" "%1"'
+            # Register the kiosk user's .pdf handler = BrotherPrint, so opening a PDF goes straight into the
+            # print app (preview + pay prompt + IPP to the Brother). If BrotherPrint isn't present (download
+            # failed), fall back to the locked Edge PDF viewer (pdfopen.ps1) so PDFs still open.
+            if (Test-Path 'C:\Kiosk\BrotherPrint\BrotherPrint.exe') {
+                $pdfCmd = '"C:\Kiosk\BrotherPrint\BrotherPrint.exe" "%1"'
+            } else {
+                $pdfCmd = '"' + $kioskExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $pdfOpenPs1 + '" "%1"'
+            }
             reg add "HKU\LockAll\Software\Classes\OtzarPDF" /ve /t REG_SZ /d "Otzar PDF" /f | Out-Null
             reg add "HKU\LockAll\Software\Classes\OtzarPDF\shell\open\command" /ve /t REG_SZ /d $pdfCmd /f | Out-Null
             reg add "HKU\LockAll\Software\Classes\.pdf" /ve /t REG_SZ /d "OtzarPDF" /f | Out-Null
