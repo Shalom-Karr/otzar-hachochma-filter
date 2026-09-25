@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.2.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.3.0'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -560,6 +560,45 @@ if (-not $Undo) {
             }
         }
     } catch { Write-Host "  driver-switch err: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# ---------------- 3g2. capture-to-BrotherPrint print flow (pay-gated IPP) ----------------
+# Patrons print to a silent "Otzar Print" queue (Microsoft Print to PDF on a FILE port -> writes a PDF
+# with NO save dialog). The kioskbar watches for that PDF and opens BrotherPrint, which shows the pay
+# prompt and sends the job to the Brother over IPP (network). The real Brother queue is removed so a
+# patron cannot pick it and skip the pay gate. Requires the Brother reachable on the LAN to actually
+# print (see brother-print repo). NEEDS on-site testing before relying on it.
+$bpDir  = 'C:\Kiosk\BrotherPrint'
+$capDir = Join-Path $PubLog 'printjobs'
+$capPort= Join-Path $capDir 'capture.pdf'
+if (-not $Undo) {
+    try { New-Item -ItemType Directory -Path $bpDir, $capDir -Force | Out-Null } catch {}
+    try { icacls $capDir /grant "${OtzarUser}:(OI)(CI)M" /grant "*S-1-5-32-545:(OI)(CI)M" /T /Q 2>$null | Out-Null } catch {}
+    # download BrotherPrint (fast folder build) from its GitHub release
+    try {
+        $bpZip = "$env:TEMP\BrotherPrint.zip"
+        Invoke-WebRequest 'https://github.com/Shalom-Karr/brother-print/releases/latest/download/BrotherPrint-windows.zip' -OutFile $bpZip -UseBasicParsing -TimeoutSec 180
+        Expand-Archive $bpZip $bpDir -Force
+        Slog "  BrotherPrint downloaded -> $bpDir" "Green"
+    } catch { Slog "  BrotherPrint download FAILED: $($_.Exception.Message) - drop it in $bpDir manually" "Yellow" }
+    # BrotherPrint lives outside the allowed dirs, so un-deny its exe(s) or the kiosk would block them
+    try { Get-ChildItem $bpDir -Recurse -Filter '*.exe' -EA SilentlyContinue | ForEach-Object { Set-ExeDeny $_.FullName $false } } catch {}
+    # capture printer: Microsoft Print to PDF on a FILE port = silent PDF, no prompt
+    try {
+        if (-not (Get-PrinterPort -Name $capPort -EA SilentlyContinue)) { Add-PrinterPort -Name $capPort -EA Stop }
+        if (-not (Get-Printer -Name 'Otzar Print' -EA SilentlyContinue)) {
+            Add-Printer -Name 'Otzar Print' -DriverName 'Microsoft Print To PDF' -PortName $capPort -EA Stop
+        }
+        Slog "  capture printer 'Otzar Print' -> $capPort (silent PDF)" "Green"
+    } catch { Slog "  capture printer FAILED: $($_.Exception.Message)" "Yellow" }
+    # remove the Windows Brother queue (we reach the Brother via IPP from BrotherPrint, not this queue;
+    # leaving it would let a patron pick it and print around the pay gate)
+    try { Get-Printer -EA SilentlyContinue | Where-Object { $_.Name -match 'Brother' } | ForEach-Object { Remove-Printer -Name $_.Name -EA SilentlyContinue; Slog "  removed Windows printer '$($_.Name)' (patrons print via the pay gate)" "DarkGray" } } catch {}
+} else {
+    try { Remove-Printer -Name 'Otzar Print' -EA SilentlyContinue } catch {}
+    try { Remove-PrinterPort -Name $capPort -EA SilentlyContinue } catch {}
+    try { Remove-Item $bpDir -Recurse -Force -EA SilentlyContinue } catch {}
+    Write-Host "  capture printer + BrotherPrint removed." -ForegroundColor Green
 }
 
 # ---------------- 3h. lock down LibreOffice macros (block the Basic-IDE Shell() break-out) ----------------
@@ -1076,6 +1115,8 @@ try {
     $_.DriverName -notmatch 'Print To PDF|OneNote|XPS|Fax|PDF ?Converter' -and
     $_.PortName   -notmatch '^(PORTPROMPT:|nul:?$|PCONVERT:|SHRFAX:)'
   } | Select-Object -First 1)
+  $cap = Get-Printer -Name 'Otzar Print' -ErrorAction SilentlyContinue
+  if ($cap) { try { (New-Object -ComObject WScript.Network).SetDefaultPrinter('Otzar Print'); Log "session default printer -> 'Otzar Print' (capture -> BrotherPrint)" } catch { Log "SetDefaultPrinter(capture) failed: $($_.Exception.Message)" } }
   if ($phys) {
     try { (New-Object -ComObject WScript.Network).SetDefaultPrinter($phys.Name); Log "session default printer -> '$($phys.Name)'" } catch { Log "SetDefaultPrinter failed: $($_.Exception.Message)" }
     # warm capabilities up to ~15s: reading PaperSizes forces the driver to fetch/cache its DEVMODE.
@@ -2022,6 +2063,34 @@ if ($script:pgOn) {
   $printTmr.Start()
   Log ("print gate ON (rate " + $script:pgCur + ('{0:N2}' -f $script:pgRate) + "/page)")
 }
+# ---- capture watcher: Otzar prints to 'Otzar Print' (writes capture.pdf) -> open BrotherPrint (pay gate) ----
+$script:capDir  = "C:\Users\Public\Documents\OtzarKiosk\printjobs"
+$script:capFile = "C:\Users\Public\Documents\OtzarKiosk\printjobs\capture.pdf"
+$script:bpExe   = "C:\Kiosk\BrotherPrint\BrotherPrint.exe"
+$script:capLast = -1; $script:capStable = 0
+$capTmr = New-Object System.Windows.Forms.Timer
+$capTmr.Interval = 600
+$capTmr.Add_Tick({
+  try {
+    if (Test-Path $script:capFile) {
+      $sz = 0; try { $sz = (Get-Item $script:capFile -ErrorAction SilentlyContinue).Length } catch {}
+      if ($sz -gt 0 -and $sz -eq $script:capLast) {
+        $script:capStable++
+        if ($script:capStable -ge 2) {
+          $dest = Join-Path $script:capDir ("job_{0}.pdf" -f (Get-Date -Format 'yyyyMMdd_HHmmssfff'))
+          try {
+            Move-Item $script:capFile $dest -Force -ErrorAction Stop
+            if (Test-Path $script:bpExe) { Start-Process $script:bpExe -ArgumentList ('"' + $dest + '"') } else { Log "capture: BrotherPrint.exe missing at $script:bpExe" }
+            Log "capture: opened BrotherPrint for $dest"
+            $script:capStable = 0; $script:capLast = -1
+          } catch {}
+        }
+      } else { $script:capLast = $sz; $script:capStable = 0 }
+    }
+  } catch { Log "capture watch err: $($_.Exception.Message)" }
+})
+$capTmr.Start()
+Log "capture watcher started (Otzar Print -> BrotherPrint)"
 $bar.Show()
 # NOTE: broker-explorer disabled for now (it spawned a Windows taskbar/desktop). We are reverting to
 # NOT running explorer until we identify the exact broker component to start instead. $script:StartBrokerExplorer
