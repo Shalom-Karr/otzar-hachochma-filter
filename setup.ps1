@@ -53,7 +53,7 @@ param(
     [switch]$NoUpdate                       # skip the GitHub self-update check
 )
 
-$KioskVersion = '3.3.1'   # local version. On release bump BOTH this and the /version file (served on Pages).
+$KioskVersion = '3.3.2'   # local version. On release bump BOTH this and the /version file (served on Pages).
 
 # ---- must be elevated ----
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1835,13 +1835,16 @@ $bar.Add_Paint({ param($snd, $e); $pen = New-Object System.Drawing.Pen($barTopBo
 $tileOtzar = New-Tile "Otzar Hachochma" "__OTZAR__" 12 12 230 48 12 $null "(?i)otzar" $null
 $tileLibre = New-Tile "LibreOffice" "__LIBRE__" 254 12 200 48 12 $null "(?i)soffice|libreoffice" $null
 $tilePdf   = New-Tile "PDF Files" "__PDF__" 466 12 200 48 12 "__PDFARGS__" $null "PDF Files"
+$tilePrint = New-Tile "Print" "C:\Kiosk\BrotherPrint\BrotherPrint.exe" 678 12 160 48 12 $null "(?i)brotherprint" $null
 $bar.Controls.Add($tileOtzar)
 $bar.Controls.Add($tileLibre)
 $bar.Controls.Add($tilePdf)
+if (Test-Path "C:\Kiosk\BrotherPrint\BrotherPrint.exe") { $bar.Controls.Add($tilePrint) }
 # make the bar tiles into mini-taskbar tiles: count badge + hover window-list popup
 Register-BarTile $tileOtzar $bar
 Register-BarTile $tileLibre $bar
 Register-BarTile $tilePdf   $bar
+Register-BarTile $tilePrint $bar
 # language toggle button (left of the credit label)
 $btnLang = New-Object System.Windows.Forms.Button
 $btnLang.Text = "EN"; $btnLang.SetBounds(($scr.Width - 670), 12, 90, 48)
